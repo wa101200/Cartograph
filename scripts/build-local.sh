@@ -1,136 +1,145 @@
 #!/usr/bin/env bash
-# Host launcher: OS dependencies and Wine run exclusively inside Docker.
+# Native Linux/Wine build. No Docker or container dependencies.
 set -euo pipefail
 
-usage() {
-  cat <<'EOF'
-Usage: scripts/build-local.sh [--check | --rebuild-image | --help]
-
-Default: build/package the Windows Steam mod inside Docker.
---check: verify container dependencies and mounted toolchains, without building.
---rebuild-image: rebuild the local dependency image, then build/package the mod.
-
-Optional environment variables:
-  JOBS                    Parallel compiler actions (default: all host CPUs).
-  CARTOGRAPH_BUILD_ROOT   Toolchain root (default: ~/.local/share/cartograph-build).
-  UE_CSS_ROOT             CSS engine folder (default: BUILD_ROOT/ue).
-  UE_WINE_MSVC            Optional host MSVC override (default: image /opt/cartograph/msvc).
-  CARTOGRAPH_DOCKER_IMAGE Existing compatible image (default: shared GHCR image).
-  CARTOGRAPH_WINEPREFIX   Dedicated Docker Wine prefix (default: BUILD_ROOT/docker-wine-prefix).
-  CARTOGRAPH_CACHE_HOME   Persistent general/Wwise cache (default: BUILD_ROOT/cache).
-  CARTOGRAPH_TMPDIR       Persistent temporary files (default: BUILD_ROOT/tmp).
-
-No game installation, Docker socket, or host home directory is mounted.
-EOF
-}
-
-mode=build
 case "${1:-}" in
-  '') ;;
-  --check) mode=check ;;
-  --rebuild-image) mode=rebuild ;;
-  --help|-h) usage; exit 0 ;;
-  *) usage >&2; exit 1 ;;
+  ''|--check) ;;
+  --help|-h) echo 'Usage: scripts/build-local.sh [--check] (native Linux/Wine, no Docker)'; exit 0 ;;
+  *) echo 'Usage: scripts/build-local.sh [--check]' >&2; exit 1 ;;
 esac
-if [ "$#" -gt 1 ]; then usage >&2; exit 1; fi
-
-command -v docker >/dev/null || { echo 'Docker is required.' >&2; exit 1; }
-docker info >/dev/null || { echo 'Cannot access the Docker daemon.' >&2; exit 1; }
-if [ "$(id -u)" -eq 0 ]; then
-  echo 'Run as a non-root user with Docker access; Unreal refuses root builds.' >&2
-  exit 1
-fi
-case "$(docker info --format '{{.Architecture}}')" in
-  x86_64|amd64) ;;
-  *) echo 'The CSS/MSVC toolchain requires a Linux amd64 Docker daemon.' >&2; exit 1 ;;
-esac
+if [ "$#" -gt 1 ]; then echo 'Too many arguments.' >&2; exit 1; fi
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-build_root="${CARTOGRAPH_BUILD_ROOT:-$HOME/.local/share/cartograph-build}"
-engine_root="${UE_CSS_ROOT:-$build_root/ue}"
-msvc_root="${UE_WINE_MSVC:-/opt/cartograph/msvc}"
-image="${CARTOGRAPH_DOCKER_IMAGE:-$(bash "$project_root/scripts/docker-image-ref.sh")}"
-jobs="${JOBS:-$(nproc)}"
-if [[ ! "$jobs" =~ ^[1-9][0-9]*$ ]]; then echo 'JOBS must be a positive integer.' >&2; exit 1; fi
+project="$project_root/FactoryGame.uproject"
+export CARTOGRAPH_BUILD_ROOT="${CARTOGRAPH_BUILD_ROOT:-$HOME/.local/share/cartograph-build}"
+export UE_CSS_ROOT="${UE_CSS_ROOT:-$CARTOGRAPH_BUILD_ROOT/ue}"
+export UE_WINE_MSVC="${UE_WINE_MSVC:-$CARTOGRAPH_BUILD_ROOT/msvc}"
+export WINEPREFIX="${WINEPREFIX:-$CARTOGRAPH_BUILD_ROOT/wine-prefix}"
+export WINEARCH="${WINEARCH:-win64}"
+export WINEDEBUG="${WINEDEBUG:--all}"
+export TMPDIR="${CARTOGRAPH_TMPDIR:-$CARTOGRAPH_BUILD_ROOT/tmp}"
+export XDG_CACHE_HOME="${CARTOGRAPH_CACHE_HOME:-$CARTOGRAPH_BUILD_ROOT/cache}"
+export PATH="$CARTOGRAPH_BUILD_ROOT/tools/usr/bin:$PATH"
+export LD_LIBRARY_PATH="$CARTOGRAPH_BUILD_ROOT/tools/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export NUGET_PACKAGES="${NUGET_PACKAGES:-$CARTOGRAPH_BUILD_ROOT/nuget}"
+ddc="${CARTOGRAPH_DDC:-$CARTOGRAPH_BUILD_ROOT/ddc}"
+parallel_jobs="${JOBS:-$(nproc)}"
 
-# Canonical paths are mounted unchanged so MSVC wrappers and cached build paths
-# continue to resolve, including SDK paths emitted by msvc-wine's installer.
-mkdir -p "$build_root"
-for path in "$build_root" "$engine_root"; do
-  if [ ! -d "$path" ]; then echo "Missing toolchain directory: $path. See LOCAL_BUILD.md." >&2; exit 1; fi
-done
-build_root="$(realpath "$build_root")"
-engine_root="$(realpath "$engine_root")"
-if [ "$msvc_root" != /opt/cartograph/msvc ]; then
-  if [ ! -d "$msvc_root" ]; then echo "Missing MSVC override: $msvc_root" >&2; exit 1; fi
-  msvc_root="$(realpath "$msvc_root")"
+if [[ ! "$parallel_jobs" =~ ^[1-9][0-9]*$ ]]; then
+  echo 'JOBS must be a positive integer.' >&2
+  exit 1
 fi
-container_home="$build_root/docker-home"
-wine_prefix="${CARTOGRAPH_WINEPREFIX:-$build_root/docker-wine-prefix}"
-cache_home="${CARTOGRAPH_CACHE_HOME:-$build_root/cache}"
-temp_dir="${CARTOGRAPH_TMPDIR:-$build_root/tmp}"
-nuget_dir="${NUGET_PACKAGES:-$build_root/nuget}"
-mkdir -p "$container_home" "$container_home/ddc" "$wine_prefix" "$cache_home" "$temp_dir" "$nuget_dir"
-wine_prefix="$(realpath "$wine_prefix")"
-cache_home="$(realpath "$cache_home")"
-temp_dir="$(realpath "$temp_dir")"
-nuget_dir="$(realpath "$nuget_dir")"
-
-if [ "$mode" = rebuild ] || ! docker image inspect "$image" >/dev/null 2>&1; then
-  if [ -n "${CARTOGRAPH_DOCKER_IMAGE:-}" ]; then
-    docker pull "$image"
-  else
-    if [ "$mode" = rebuild ] || ! docker pull "$image"; then
-      echo 'Building the shared dependency Dockerfile locally.'
-      if [ -z "${WWISE_EMAIL:-}" ] || [ -z "${WWISE_PASSWORD:-}" ]; then
-        echo 'Building the toolchain image requires WWISE_EMAIL and WWISE_PASSWORD. Authenticate to GHCR to pull the prebuilt image instead.' >&2
-        exit 1
-      fi
-      docker build --platform linux/amd64 --tag "$image" \
-        --secret id=WWISE_EMAIL,env=WWISE_EMAIL --secret id=WWISE_PASSWORD,env=WWISE_PASSWORD \
-        "$project_root/docker"
-    fi
+for command in wine gh python3 msiextract; do
+  if ! command -v "$command" >/dev/null; then
+    echo "Required command not found: $command. See LOCAL_BUILD.md." >&2
+    exit 1
   fi
+done
+for executable in \
+  "$UE_CSS_ROOT/Engine/Build/BatchFiles/Linux/Build.sh" \
+  "$UE_CSS_ROOT/Engine/Build/BatchFiles/RunUAT.sh" \
+  "$UE_WINE_MSVC/bin/x64/cl"; do
+  if [ ! -x "$executable" ]; then
+    echo "Required tool not found or not executable: $executable" >&2
+    exit 1
+  fi
+done
+mkdir -p "$TMPDIR" "$CARTOGRAPH_BUILD_ROOT/packages"
+mkdir -p "$WINEPREFIX" "$NUGET_PACKAGES" "$ddc"
+trap 'wineserver -k >/dev/null 2>&1 || true' EXIT
+timeout 120 "$UE_WINE_MSVC/bin/x64/cl" /? > /dev/null
+cd "$project_root"
+
+if [ "${1:-}" = --check ]; then
+  wine --version
+  "$UE_WINE_MSVC/bin/x64/cl" /? 2>&1 | tail -4
+  dotnet="$UE_CSS_ROOT/Engine/Binaries/ThirdParty/DotNet/8.0.300/linux-x64/dotnet"
+  "$dotnet" --info
+  echo 'Native Linux/Wine dependencies and MSVC/CSS engine checks passed.'
+  exit 0
 fi
 
-args=(run --rm --init --platform linux/amd64
-  --user "$(id -u):$(id -g)" --shm-size 2g
-  --workdir "$project_root"
-  --mount "type=bind,src=$project_root,dst=$project_root"
-  --mount "type=bind,src=$build_root,dst=$build_root"
-  --env "HOME=$container_home"
-  --env "UE-LocalDataCachePath=$container_home/ddc"
-  --env "CARTOGRAPH_BUILD_ROOT=$build_root"
-  --env CARTOGRAPH_IN_DOCKER=1
-  --env "UE_CSS_ROOT=$engine_root" --env "UE_WINE_MSVC=$msvc_root"
-  --env "WINEPREFIX=$wine_prefix" --env WINEARCH=win64 --env WINEDEBUG=-all
-  --env "CARTOGRAPH_CACHE_HOME=$cache_home" --env "XDG_CACHE_HOME=$cache_home"
-  --env "CARTOGRAPH_TMPDIR=$temp_dir" --env "TMPDIR=$temp_dir"
-  --env "NUGET_PACKAGES=$nuget_dir"
-  --env "JOBS=$jobs")
-
-# Cached CI .git metadata points to the ephemeral checkout, outside the project.
-if [ "${GITHUB_ACTIONS:-}" = true ] && [ -n "${GITHUB_WORKSPACE:-}" ] && \
-   [ "$GITHUB_WORKSPACE" != "$project_root" ]; then
-  args+=(--mount "type=bind,src=$GITHUB_WORKSPACE,dst=$GITHUB_WORKSPACE,readonly")
+if [ ! -f Plugins/Wwise/Wwise.uplugin ] || [ ! -f Plugins/WwiseNiagara/WwiseNiagara.uplugin ]; then
+  cli="$CARTOGRAPH_BUILD_ROOT/wwise-cli"
+  if [ ! -x "$cli" ]; then
+    echo 'Wwise integration is missing; install wwise-cli and its SDK first. See LOCAL_BUILD.md.' >&2
+    exit 1
+  fi
+  python3 "$project_root/scripts/register-engine.py" "$UE_CSS_ROOT" "$project"
+  "$cli" integrate-ue --integration-version '2023.1.14.3555' --project "$project" > /dev/null
 fi
 
-# Mount custom paths only when they are outside the already-mounted build root.
-# Deduplicate custom mounts when multiple cache overrides use the same path.
-declare -A mounted=(["$build_root"]=1 ["$project_root"]=1)
-for path in "$engine_root" "$msvc_root" "$wine_prefix" "$cache_home" "$temp_dir" "$nuget_dir"; do
-  if [ "$path" = /opt/cartograph/msvc ]; then continue; fi
-  if [ -n "${mounted[$path]:-}" ]; then continue; fi
-  case "$path" in
-    "$build_root"|"$build_root"/*) ;;
-    *) args+=(--mount "type=bind,src=$path,dst=$path"); mounted[$path]=1 ;;
-  esac
-done
-# Optional secrets are runtime environment only, never Docker build arguments.
-for name in GH_TOKEN WWISE_EMAIL WWISE_PASSWORD; do
-  if [ -n "${!name:-}" ]; then args+=(--env "$name"); fi
-done
+# These settings also apply to the shipping build invoked internally by Alpakit.
+# Preserve unrelated existing project-local UBT settings.
+python3 - "$project_root" "$parallel_jobs" <<'PY'
+import pathlib, sys, xml.etree.ElementTree as ET
+path = pathlib.Path(sys.argv[1]) / 'Saved/UnrealBuildTool/BuildConfiguration.xml'
+namespace = 'https://www.unrealengine.com/BuildConfiguration'
+ET.register_namespace('', namespace)
+tag = lambda name: '{' + namespace + '}' + name
+if path.exists():
+    tree = ET.parse(path)
+    root = tree.getroot()
+    if root.tag != tag('Configuration'):
+        raise SystemExit(f'Unexpected XML root in {path}; refusing to overwrite it.')
+else:
+    root = ET.Element(tag('Configuration'))
+    tree = ET.ElementTree(root)
+section = root.find(tag('BuildConfiguration'))
+if section is None:
+    section = ET.SubElement(root, tag('BuildConfiguration'))
+for name, value in [('bAllowUBAExecutor', 'false'), ('MaxParallelActions', sys.argv[2]), ('DebugInfo', 'None')]:
+    element = section.find(tag(name))
+    if element is None:
+        element = ET.SubElement(section, tag(name))
+    element.text = value
+import io
+contents = io.BytesIO()
+tree.write(contents, encoding='utf-8', xml_declaration=True)
+path.parent.mkdir(parents=True, exist_ok=True)
+if not path.exists() or path.read_bytes() != contents.getvalue():
+    path.write_bytes(contents.getvalue())
+PY
 
-args+=(--entrypoint /bin/bash "$image" "$project_root/scripts/build-local-inner.sh")
-if [ "$mode" = check ]; then args+=(--check); fi
-exec docker "${args[@]}"
+# Provide the Windows SDK debug tool used by Alpakit's staging step.
+if [ ! -f "$UE_WINE_MSVC/bin/x64/pdbcopy" ]; then
+  debug_tools="$CARTOGRAPH_BUILD_ROOT/packages/X64.Debuggers.And.Tools-x64_en-us.msi"
+  if [ ! -f "$debug_tools" ]; then
+    gh release download --repo kbandla/installers \
+      --pattern X64.Debuggers.And.Tools-x64_en-us.msi --output "$debug_tools"
+  fi
+  msiextract -C "$UE_WINE_MSVC" "$debug_tools" > /dev/null
+  cat > "$UE_WINE_MSVC/bin/x64/pdbcopy" <<'EOF'
+#!/usr/bin/env bash
+set -e
+. "$(dirname "$0")/msvcenv.sh"
+"$(dirname "$0")/wine-msvc.sh" "$SDKBASE/Debuggers/x64/pdbcopy.exe" "$@"
+EOF
+  ln -sf ./pdbcopy "$UE_WINE_MSVC/bin/x64/pdbcopy.exe"
+  chmod +x "$UE_WINE_MSVC/bin/x64/pdbcopy"
+fi
+
+echo "Building Linux editor with up to $parallel_jobs parallel actions..."
+env "UE-LocalDataCachePath=$ddc" "$UE_CSS_ROOT/Engine/Build/BatchFiles/Linux/Build.sh" FactoryEditor Linux Development \
+  "-project=$project" -NoUBA -NoDebugInfo "-MaxParallelActions=$parallel_jobs"
+
+hard=$(ulimit -Hn)
+if [ "$hard" = unlimited ] || [ "$hard" -ge 1048576 ]; then
+  ulimit -Sn 1048576
+else
+  ulimit -Sn "$hard"
+fi
+echo 'Packaging the Windows Steam client mod using Wine/MSVC...'
+env "UE-LocalDataCachePath=$ddc" "$UE_CSS_ROOT/Engine/Build/BatchFiles/RunUAT.sh" \
+  "-ScriptsForProject=$project" PackagePlugin "-project=$project" \
+  -DLCName=Cartograph -Target=FactoryGameSteam -merge -build \
+  -ddc=InstalledNoZenLocalFallback \
+  -clientconfig=Shipping -serverconfig=Shipping -platform=Win64 \
+  -nocompileeditor -installed
+
+archive_root="$project_root/Saved/ArchivedPlugins/Cartograph"
+if [ ! -f "$archive_root/Cartograph-Windows.zip" ]; then
+  echo "Packaging finished without the expected archive: $archive_root/Cartograph-Windows.zip" >&2
+  exit 1
+fi
+echo "Built package: $archive_root/Cartograph-Windows.zip"
