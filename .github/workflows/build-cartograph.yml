@@ -27,6 +27,35 @@ jobs:
         uses: actions/checkout@v6
         with:
           path: project
+          persist-credentials: false
+
+      - name: Use short Windows build paths
+        run: |
+          if (Test-Path 'C:\cg') { throw 'C:\cg already exists; refusing to overwrite it.' }
+          Move-Item (Join-Path $env:GITHUB_WORKSPACE 'project') 'C:\cg'
+
+      - name: Verify PowerShell pre-build environment
+        run: |
+          & pwsh -NoProfile -ExecutionPolicy Bypass -Command 'Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; Get-Command Unblock-File -ErrorAction Stop; $PSVersionTable.PSVersion'
+          if ($LASTEXITCODE -ne 0) { throw 'PowerShell 7 security module is unavailable; the Wwise pre-build hook cannot run.' }
+
+      - name: Install preferred MSVC 14.38 toolchain
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vsRoot = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vsRoot) { throw 'Visual Studio 2022 C++ build tools were not found.' }
+          $toolchains = Join-Path $vsRoot 'VC\Tools\MSVC'
+          $preferred = Get-ChildItem $toolchains -Directory | Where-Object Name -Like '14.38.*'
+          if (!$preferred) {
+            $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\setup.exe'
+            $arguments = "modify --installPath `"$vsRoot`" --add Microsoft.VisualStudio.Component.VC.14.38.17.8 --quiet --norestart"
+            $process = Start-Process $installer -ArgumentList $arguments -Wait -PassThru
+            if ($process.ExitCode -notin @(0, 3010)) { throw "MSVC installation failed with exit code $($process.ExitCode)." }
+          }
+          if (!(Get-ChildItem $toolchains -Directory | Where-Object Name -Like '14.38.*')) {
+            throw 'The preferred MSVC 14.38 compiler was not installed.'
+          }
+          Get-ChildItem $toolchains -Directory | Select-Object Name
 
       - name: Check dependency credentials
         env:
@@ -49,7 +78,7 @@ jobs:
           GH_TOKEN: ${{ secrets.CSS_ENGINE_TOKEN }}
           ENGINE_RELEASE: ${{ vars.CSS_ENGINE_RELEASE }}
         run: |
-          $engineRoot = Join-Path $env:RUNNER_TEMP 'ue'
+          $engineRoot = 'C:\ue'
           New-Item -ItemType Directory -Force -Path $engineRoot | Out-Null
           $arguments = @('release', 'download', '--repo', 'satisfactorymodding/UnrealEngine',
             '--pattern', 'UnrealEngine-CSS-Editor-Win64.7z.*', '--dir', $engineRoot)
@@ -75,7 +104,7 @@ jobs:
           Get-PSDrive -PSProvider FileSystem | Select-Object Name,Used,Free
 
       - name: Download and integrate Wwise
-        working-directory: project
+        working-directory: C:/cg
         env:
           GH_TOKEN: ${{ github.token }}
           WWISE_EMAIL: ${{ secrets.WWISE_EMAIL }}
@@ -99,7 +128,7 @@ jobs:
           }
 
       - name: Build editor target
-        working-directory: project
+        working-directory: C:/cg
         run: |
           $projectFile = Join-Path $PWD 'FactoryGame.uproject'
           $buildScript = Join-Path $env:UE_CSS_ROOT 'Engine\Build\BatchFiles\Build.bat'
@@ -109,7 +138,7 @@ jobs:
           }
 
       - name: Package Cartograph Windows client
-        working-directory: project
+        working-directory: C:/cg
         run: |
           $projectFile = Join-Path $PWD 'FactoryGame.uproject'
           $uatScript = Join-Path $env:UE_CSS_ROOT 'Engine\Build\BatchFiles\RunUAT.bat'
@@ -137,7 +166,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: Cartograph-Windows-${{ github.run_number }}
-          path: project/artifacts/Cartograph-Windows.zip
+          path: C:/cg/artifacts/Cartograph-Windows.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 90

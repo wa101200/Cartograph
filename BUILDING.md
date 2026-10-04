@@ -12,6 +12,10 @@ The workflow no longer depends on `WINDOWS_16_CORE_READY` or a custom GitHub-hos
 
 Blacksmith includes Visual Studio Build Tools 2022 instead of the full IDE. The required engine/compiler compatibility must still be verified by the build. See <https://docs.blacksmith.sh/blacksmith-runners/overview> for current runner specifications.
 
+The Windows Wwise patch pre-build hook uses PowerShell 7 (`pwsh`), available on the CI image, rather than legacy Windows PowerShell. Local Windows builds of this organization branch also require PowerShell 7 on PATH. Execution-policy bypass is limited to that subprocess, not applied system-wide.
+
+The workflow follows [SML's Windows CI](https://github.com/satisfactorymodding/SatisfactoryModLoader/blob/v3.11.3/.github/workflows/build.yml) and [current SML CI](https://github.com/satisfactorymodding/SatisfactoryModLoader/blob/master/.github/workflows/build.yml): build the editor first, then invoke the CSS `PackagePlugin` command. It uses short `C:\cg` and `C:\ue` paths to avoid MSVC path-length limits and installs the preferred MSVC 14.38 (VS 17.8) compiler if missing. The current upstream CI uses Linux/Wine; this workflow retains the requested Blacksmith Windows runner.
+
 ## Required Actions secrets
 
 Under **Settings → Secrets and variables → Actions → Secrets**, add:
