@@ -37,3 +37,6 @@ EOF
 ln -sf ./pdbcopy "$msvc_dir/bin/x64/pdbcopy.exe"
 chmod +x "$msvc_dir/bin/x64/pdbcopy" "$msvc_dir/bin/x64/pdbcopy.exe"
 echo "UE_WINE_MSVC=$(realpath "$msvc_dir")" >> "$GITHUB_ENV"
+
+# Verify the downloaded compiler starts under Wine before downloading the engine.
+"$msvc_dir/bin/x64/cl" /? > /dev/null

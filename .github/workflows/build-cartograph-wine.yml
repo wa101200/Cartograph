@@ -18,13 +18,16 @@ concurrency:
 
 jobs:
   build:
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    # Blacksmith's confirmed standard Linux catalog currently tops out at 32 vCPU.
+    # Override only after a custom larger runner label is available.
+    runs-on: ${{ vars.CARTOGRAPH_LINUX_RUNNER || 'blacksmith-32vcpu-ubuntu-2404' }}
     timeout-minutes: 360
     defaults:
       run:
         shell: bash
     env:
       WINEPREFIX: /tmp/cg-wine-prefix
+      WINEARCH: win64
       WINEDEBUG: -all
       PROJECT_ROOT: /tmp/cg
       UE_CSS_ROOT: /tmp/cg-ue
@@ -54,15 +57,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             wget build-essential zstd dos2unix patch msitools perl python3 \
-            xvfb xauth gcc-multilib gcc-mingw-w64 flex bison \
-            libasound2-dev bluez libpulse-dev libdbus-1-dev libfontconfig-dev \
-            libfreetype-dev libgnutls28-dev libgl-dev libunwind-dev \
-            libx11-dev libxcomposite-dev libxcursor-dev libxfixes-dev libxi-dev \
-            libxrandr-dev libxrender-dev libxext-dev libwayland-bin libwayland-dev \
-            libegl-dev libxkbcommon-dev libxkbregistry-dev libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev libosmesa6-dev libsdl2-dev libudev-dev libvulkan-dev
+            xvfb xauth gnupg ca-certificates winbind \
+            libgtk-3-0 libnss3 libxss1 libasound2t64 libgbm1
 
-      - name: Build patched Wine 11
+      - name: Install prebuilt Wine 11.19
         run: bash .github/scripts/setup-ci-wine.sh
 
       - name: Install MSVC 17.8 and Windows SDK
