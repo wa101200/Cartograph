@@ -40,7 +40,8 @@ def main():
     if runner is None:
         images = api(f"{base}/hosted-runners/images/github-owned")["images"]
         image = next(
-            (i for i in images if i["id"] == "windows-2022"), None
+            (i for i in images if i["platform"] == "win-x64"
+             and i["display_name"] == "Windows Server 2022"), None
         )
         if image is None:
             raise SystemExit(
