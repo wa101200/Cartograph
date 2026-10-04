@@ -1,31 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install signed precompiled WineHQ packages. No Wine source build or fallback.
-# Unlike SML's patched source build, the typelib patch is not guaranteed here;
-# command-line MSVC/Unreal compatibility is tested by this experimental workflow.
-wine_version='11.19~noble-1'
-. /etc/os-release
-if [ "$ID" != ubuntu ] || [ "$VERSION_ID" != 24.04 ]; then
-  echo 'This Wine package setup requires Ubuntu 24.04.' >&2
-  exit 1
-fi
-sudo dpkg --add-architecture i386
-sudo mkdir -p /etc/apt/keyrings
-wget -q -O "$RUNNER_TEMP/winehq.key" https://dl.winehq.org/wine-builds/winehq.key
-gpg --batch --yes --dearmor -o "$RUNNER_TEMP/winehq-archive.key" "$RUNNER_TEMP/winehq.key"
-sudo install -m 644 "$RUNNER_TEMP/winehq-archive.key" /etc/apt/keyrings/winehq-archive.key
-wget -q -O "$RUNNER_TEMP/winehq-noble.sources" \
-  https://dl.winehq.org/wine-builds/ubuntu/dists/noble/winehq-noble.sources
-sudo install -m 644 "$RUNNER_TEMP/winehq-noble.sources" /etc/apt/sources.list.d/winehq-noble.sources
-sudo apt-get update
-sudo apt-get install -y --install-recommends \
-  "winehq-devel=$wine_version" "wine-devel=$wine_version" \
-  "wine-devel-amd64=$wine_version" "wine-devel-i386:i386=$wine_version"
-export PATH="/opt/wine-devel/bin:$PATH"
-echo '/opt/wine-devel/bin' >> "$GITHUB_PATH"
+# SML's source-built Wine avoids WineHQ package-server and i386-repository setup.
+wine_source="$RUNNER_TEMP/cartograph-wine-source"
+wine_patch="$RUNNER_TEMP/cartograph-wine-typelib.patch"
+echo 'Downloading the SML typelib patch...'
+wget --timeout=30 --tries=3 -O "$wine_patch" \
+  https://gitlab.winehq.org/wine/wine/-/merge_requests/9640.patch
+echo 'Checking out Wine 11.0...'
+git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 clone --depth 1 \
+  --branch wine-11.0 https://gitlab.winehq.org/wine/wine.git "$wine_source"
+git -C "$wine_source" -c user.name='Cartograph CI' -c user.email='ci@example.com' am "$wine_patch"
+mkdir -p "$wine_source/build"
+cd "$wine_source/build"
+echo "Configuring and compiling Wine with $(nproc) parallel jobs..."
+../configure --enable-archs=x86_64,i386 --without-tests
+make -j"$(nproc)"
+sudo make install
 
 mkdir -p "$WINEPREFIX"
+echo 'Initializing the Wine prefix...'
 WINEDLLOVERRIDES='mscoree,mshtml=' xvfb-run -a wineboot -u
 wineserver -w
 wine --version
