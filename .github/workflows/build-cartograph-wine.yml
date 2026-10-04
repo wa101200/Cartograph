@@ -24,7 +24,7 @@ jobs:
       run:
         shell: bash
     env:
-      WINEPREFIX: ${{ runner.temp }}/wine-prefix
+      WINEPREFIX: /tmp/cg-wine-prefix
       WINEDEBUG: -all
       PROJECT_ROOT: /tmp/cg
       UE_CSS_ROOT: /tmp/cg-ue
