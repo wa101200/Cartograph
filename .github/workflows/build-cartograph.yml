@@ -14,8 +14,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check-runner:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check 64-core runner readiness
+        env:
+          RUNNER_READY: ${{ vars.WINDOWS_64_CORE_READY }}
+        run: |
+          if [ "$RUNNER_READY" != "true" ]; then
+            echo '::error::The 64-core hosted Windows runner is not enabled. Upgrade the organization to an eligible plan, configure billing, then run scripts/setup-hosted-runner.py. See BUILDING.md.'
+            exit 1
+          fi
+
   build:
-    runs-on: windows-2022
+    needs: check-runner
+    # This is an organization-configured GitHub-hosted runner name, not a
+    # standard label that GitHub automatically provisions.
+    runs-on: cartograph-windows-64core
     timeout-minutes: 360
     defaults:
       run:
