@@ -1,21 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-msvc_scripts="$RUNNER_TEMP/cartograph-msvc-wine"
-msvc_dir="$RUNNER_TEMP/cartograph-msvc"
-debug_tools="$RUNNER_TEMP/X64.Debuggers.And.Tools-x64_en-us.msi"
-git clone https://github.com/mircearoata/msvc-wine.git "$msvc_scripts"
+cache_root="${CI_CACHE_ROOT:-$RUNNER_TEMP/cartograph-cache}"
+mkdir -p "$cache_root/downloads/msvc"
+msvc_scripts="$cache_root/msvc-wine"
+msvc_dir="$cache_root/msvc"
+debug_tools="$cache_root/downloads/X64.Debuggers.And.Tools-x64_en-us.msi"
+if [ ! -d "$msvc_scripts/.git" ]; then
+  git clone https://github.com/mircearoata/msvc-wine.git "$msvc_scripts"
+fi
 git -C "$msvc_scripts" checkout 61b7cbc8cb9413fec8f0016ef433a90e06c37f54
 
-"$msvc_scripts/vsdownload.py" --accept-license --dest "$msvc_dir" \
-  --channel release.ltsc.17.8 --msvc-version 17.8 --sdk-version 10.0.22621 \
-  Microsoft.Net.4.8.SDK Microsoft.VisualStudio.MinShell
-wget -q -O "$debug_tools" \
-  https://github.com/kbandla/installers/releases/latest/download/X64.Debuggers.And.Tools-x64_en-us.msi
-msiextract -C "$msvc_dir" "$debug_tools" > /dev/null
-"$msvc_scripts/install.sh" "$msvc_dir"
+if [ ! -f "$msvc_dir/.installed" ]; then
+  "$msvc_scripts/vsdownload.py" --accept-license --dest "$msvc_dir" \
+    --cache "$cache_root/downloads/msvc" \
+    --channel release.ltsc.17.8 --msvc-version 17.8 --sdk-version 10.0.22621 \
+    Microsoft.Net.4.8.SDK Microsoft.VisualStudio.MinShell
+  if [ ! -f "$debug_tools" ]; then
+    wget --timeout=30 --tries=3 -O "$debug_tools" \
+      https://github.com/kbandla/installers/releases/latest/download/X64.Debuggers.And.Tools-x64_en-us.msi
+  fi
+  msiextract -C "$msvc_dir" "$debug_tools" > /dev/null
+  "$msvc_scripts/install.sh" "$msvc_dir"
+else
+  echo 'Reusing cached MSVC 17.8 and Windows SDK 10.0.22621.'
+fi
 
 # PDBCopy wrapper from SML's Linux CI.
+if [ ! -f "$msvc_dir/bin/x64/pdbcopy" ]; then
 cat > "$msvc_dir/bin/x64/pdbcopy" <<'EOF'
 #!/usr/bin/env bash
 # Copyright (c) 2025 Mircea Roata
@@ -36,7 +48,9 @@ SDKDEBUGBINDIR="$SDKBASE/Debuggers/x64"
 EOF
 ln -sf ./pdbcopy "$msvc_dir/bin/x64/pdbcopy.exe"
 chmod +x "$msvc_dir/bin/x64/pdbcopy" "$msvc_dir/bin/x64/pdbcopy.exe"
+fi
 echo "UE_WINE_MSVC=$(realpath "$msvc_dir")" >> "$GITHUB_ENV"
 
 # Verify the downloaded compiler starts under Wine before downloading the engine.
 "$msvc_dir/bin/x64/cl" /? > /dev/null
+if [ ! -f "$msvc_dir/.installed" ]; then touch "$msvc_dir/.installed"; fi

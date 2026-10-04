@@ -2,9 +2,6 @@ name: Build Cartograph (Linux Wine)
 
 on:
   push:
-    paths-ignore:
-      - .github/workflows/build-cartograph.yml
-      - scripts/setup-hosted-runner.py
   release:
     types: [published]
   workflow_dispatch:
@@ -12,25 +9,28 @@ on:
 permissions:
   contents: read
 
+# Serialize snapshots of the same branch's generated outputs. Different branches
+# have separate output caches; toolchains are keyed by their pinned inputs.
 concurrency:
   group: cartograph-wine-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    # Blacksmith's confirmed standard Linux catalog currently tops out at 32 vCPU.
-    # Override only after a custom larger runner label is available.
     runs-on: ${{ vars.CARTOGRAPH_LINUX_RUNNER || 'blacksmith-32vcpu-ubuntu-2404' }}
     timeout-minutes: 360
     defaults:
       run:
         shell: bash
     env:
+      CI_CACHE_ROOT: /tmp/cg-cache
+      PROJECT_ROOT: /tmp/cg
+      UE_CSS_ROOT: /tmp/cg-cache/ue
       WINEPREFIX: /tmp/cg-wine-prefix
       WINEARCH: win64
       WINEDEBUG: -all
-      PROJECT_ROOT: /tmp/cg
-      UE_CSS_ROOT: /tmp/cg-ue
+      NUGET_PACKAGES: /tmp/cg-cache/nuget
+      ENGINE_RELEASE: ${{ vars.CSS_ENGINE_RELEASE || '5.6.1-css-83' }}
 
     steps:
       - name: Check out source
@@ -38,7 +38,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check dependency credentials
+      - name: Check dependency credentials before restoring toolchains
         env:
           GH_TOKEN: ${{ secrets.CSS_ENGINE_TOKEN }}
           WWISE_EMAIL: ${{ secrets.WWISE_EMAIL }}
@@ -52,81 +52,79 @@ jobs:
           done
           gh api repos/satisfactorymodding/UnrealEngine --jq '.full_name'
 
-      - name: Install build dependencies
+      - name: Compute cache keys
+        id: keys
+        env:
+          TOOLCHAIN_INPUTS: ${{ hashFiles('.github/ci-packages.txt', '.github/scripts/setup-ci-*.sh') }}
+          ABI_INPUTS: ${{ hashFiles('FactoryGame.uproject', 'Source/*.Target.cs', 'Config/**', 'Mods/**/*.uplugin') }}
         run: |
+          toolchain=$(printf '%s' "ubuntu2404-x64-v1-$ENGINE_RELEASE-$TOOLCHAIN_INPUTS" | sha256sum | cut -c1-24)
+          outputs=$(printf '%s' "v1-$toolchain-$GITHUB_REF-$ABI_INPUTS" | sha256sum | cut -c1-24)
+          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
+          echo "outputs=$outputs" >> "$GITHUB_OUTPUT"
+          echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore engine, MSVC, Wwise, Wine and NuGet storage
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1
+        with:
+          key: cartograph-${{ github.repository_id }}-tools-${{ steps.keys.outputs.toolchain }}
+          path: /tmp/cg-cache
+          commit: on-change
+
+      - name: Restore incremental compiler and cooker outputs
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1
+        with:
+          key: cartograph-${{ github.repository_id }}-build-${{ steps.keys.outputs.outputs }}
+          path: /tmp/cg
+          commit: on-change
+
+      - name: Restore apt package downloads
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/cartograph-apt
+          key: apt-ubuntu2404-${{ steps.keys.outputs.month }}-${{ hashFiles('.github/ci-packages.txt') }}
+          restore-keys: |
+            apt-ubuntu2404-
+
+      - name: Install build dependencies from cached packages
+        run: |
+          sudo chown "$(id -u):$(id -g)" "$CI_CACHE_ROOT" "$PROJECT_ROOT"
+          mkdir -p "$RUNNER_TEMP/cartograph-apt/partial" "$CI_CACHE_ROOT/ddc" "$NUGET_PACKAGES"
+          mapfile -t packages < .github/ci-packages.txt
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            wget build-essential zstd dos2unix patch msitools perl python3 \
-            xvfb xauth gnupg ca-certificates winbind \
-            gcc-multilib gcc-mingw-w64 flex bison \
-            libasound2-dev bluez libpulse-dev libdbus-1-dev libfontconfig-dev \
-            libfreetype-dev libgnutls28-dev libgl-dev libunwind-dev \
-            libx11-dev libxcomposite-dev libxcursor-dev libxfixes-dev libxi-dev \
-            libxrandr-dev libxrender-dev libxext-dev libwayland-bin libwayland-dev \
-            libegl-dev libxkbcommon-dev libxkbregistry-dev libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev libosmesa6-dev libsdl2-dev libudev-dev libvulkan-dev \
-            libgtk-3-0 libnss3 libxss1 libasound2t64 libgbm1
+            -o "Dir::Cache::archives=$RUNNER_TEMP/cartograph-apt" "${packages[@]}"
+          echo "UE-LocalDataCachePath=$CI_CACHE_ROOT/ddc" >> "$GITHUB_ENV"
 
-      - name: Build patched Wine 11 from source
+      - name: Restore or build patched Wine 11
         timeout-minutes: 90
         run: bash .github/scripts/setup-ci-wine.sh
 
-      - name: Install MSVC 17.8 and Windows SDK
+      - name: Restore or install MSVC 17.8 and Windows SDK
         run: bash .github/scripts/setup-ci-msvc.sh
 
-      - name: Prepare short project path
-        run: |
-          test ! -e "$PROJECT_ROOT"
-          cp -a "$GITHUB_WORKSPACE" "$PROJECT_ROOT"
-          mkdir -p "$UE_CSS_ROOT"
+      - name: Synchronize inputs without invalidating cached timestamps
+        run: bash .github/scripts/prepare-ci-project.sh
 
-      - name: Download and register Linux CSS Unreal Engine
-        working-directory: /tmp/cg-ue
+      - name: Restore or download and register CSS Unreal Engine
         env:
           GH_TOKEN: ${{ secrets.CSS_ENGINE_TOKEN }}
-          ENGINE_RELEASE: ${{ vars.CSS_ENGINE_RELEASE }}
-        run: |
-          args=(release download --repo satisfactorymodding/UnrealEngine --pattern 'UnrealEngine-CSS-Editor-Linux.tar.zst.*')
-          if [ -n "$ENGINE_RELEASE" ]; then args+=("$ENGINE_RELEASE"); fi
-          gh "${args[@]}"
-          cat UnrealEngine-CSS-Editor-Linux.tar.zst.* | zstd -d | tar -xf -
-          # Delete only downloaded archive parts, after successful extraction.
-          find . -maxdepth 1 -type f -name 'UnrealEngine-CSS-Editor-Linux.tar.zst.*' -delete
-          python3 - <<'PY'
-          import json
-          with open('Engine/Build/Build.version') as f:
-              version = json.load(f)
-          assert [version[k] for k in ('MajorVersion', 'MinorVersion', 'PatchVersion')] == [5, 6, 1], 'Wrong engine version'
-          PY
-          ./Engine/Binaries/Linux/UnrealVersionSelector -register -unattended
-          df -h .
+        run: bash .github/scripts/setup-ci-engine.sh
 
-      - name: Download and integrate Wwise
+      - name: Restore or download and integrate Wwise
         env:
           GH_TOKEN: ${{ github.token }}
           WWISE_EMAIL: ${{ secrets.WWISE_EMAIL }}
           WWISE_PASSWORD: ${{ secrets.WWISE_PASSWORD }}
-        run: |
-          cli="$RUNNER_TEMP/wwise-cli"
-          gh release download v0.2.4 --repo mircearoata/wwise-cli --pattern wwise-cli_linux_amd64 --output "$cli"
-          chmod +x "$cli"
-          # Suppress signed download URLs and account authentication output.
-          "$cli" download --sdk-version '2023.1.14.8770' --filter Packages=SDK \
-            --filter DeploymentPlatforms=Windows_vc160 --filter DeploymentPlatforms=Windows_vc170 \
-            --filter DeploymentPlatforms=Linux --filter DeploymentPlatforms= > /dev/null
-          "$cli" integrate-ue --integration-version '2023.1.14.3555' \
-            --project "$PROJECT_ROOT/FactoryGame.uproject" > /dev/null
-          test -f "$PROJECT_ROOT/Plugins/Wwise/Wwise.uplugin"
-          test -f "$PROJECT_ROOT/Plugins/WwiseNiagara/WwiseNiagara.uplugin"
+        run: bash .github/scripts/setup-ci-wwise.sh
 
-      - name: Build Linux editor target
+      - name: Incrementally build Linux editor target
         run: |
-          "$UE_CSS_ROOT/Engine/Build/BatchFiles/Linux/Build.sh" \
-            FactoryEditor Linux Development "-project=$PROJECT_ROOT/FactoryGame.uproject"
+          "$UE_CSS_ROOT/Engine/Build/BatchFiles/Linux/Build.sh" FactoryEditor Linux Development \
+            "-project=$PROJECT_ROOT/FactoryGame.uproject" -NoUBA -NoDebugInfo "-MaxParallelActions=$(nproc)"
 
-      - name: Package Windows client with Wine MSVC
+      - name: Incrementally package Windows Steam client
         run: |
-          # Prevent Zen from requesting a file-descriptor limit above fs.nr_open.
           hard=$(ulimit -Hn)
           if [ "$hard" = unlimited ] || [ "$hard" -ge 1048576 ]; then
             ulimit -Sn 1048576
@@ -136,11 +134,9 @@ jobs:
           "$UE_CSS_ROOT/Engine/Build/BatchFiles/RunUAT.sh" \
             "-ScriptsForProject=$PROJECT_ROOT/FactoryGame.uproject" PackagePlugin \
             "-project=$PROJECT_ROOT/FactoryGame.uproject" -DLCName=Cartograph \
-            -merge -build -clientconfig=Shipping -serverconfig=Shipping \
-            -platform=Win64 -nocompileeditor -installed
-          archive="$PROJECT_ROOT/Saved/ArchivedPlugins/Cartograph"
-          test -d "$archive"
-          test -n "$(find "$archive" -maxdepth 1 -type f -name '*.zip' -print -quit)"
+            -Target=FactoryGameSteam -merge -build -clientconfig=Shipping -serverconfig=Shipping \
+            -platform=Win64 -nocompileeditor -installed -ddc=InstalledNoZenLocalFallback
+          test -f "$PROJECT_ROOT/Saved/ArchivedPlugins/Cartograph/Cartograph-Windows.zip"
 
       - name: Upload packaged mod
         uses: actions/upload-artifact@v7
@@ -150,3 +146,10 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 90
+
+      - name: Summarize persistent cache sizes
+        if: always()
+        run: |
+          du -sh "$CI_CACHE_ROOT" "$PROJECT_ROOT" 2>/dev/null || true
+          # Remove only our ephemeral Git link; actual checkout metadata isn't cached.
+          if [ -L "$PROJECT_ROOT/.git" ]; then unlink "$PROJECT_ROOT/.git"; fi

@@ -1,36 +1,42 @@
-# Building Cartograph in GitHub Actions
+# Build and CI
 
-This organization copy uses **Blacksmith's `blacksmith-32vcpu-windows-2025` runner**, with **32 vCPU, 112 GB RAM, and 130 GB disk**. Windows runners are currently a Blacksmith public beta. No self-hosted runner or personal Windows VM is required. It runs on pushes, published releases, and manual dispatches, builds the editor target, and packages the Windows client mod for Satisfactory (including Proton).
+## Local builds: Docker only
 
-The personal copy at `wadhah101/Cartograph` is preserved and continues to use the standard `windows-2022` runner.
+```bash
+./scripts/build-local.sh --check
+./scripts/build-local.sh
+```
 
-## Blacksmith setup
+All local Wine/compiler/Unreal processes run inside the dependency container. There is no native fallback, and the container-side script rejects direct host execution. The host needs Docker and the toolchain files, not Wine or compiler packages. See [LOCAL_BUILD.md](LOCAL_BUILD.md).
 
-Connect the organization at <https://app.blacksmith.sh> and grant the Blacksmith GitHub App access to `wa101200/Cartograph`. The organization already had the app installed for all repositories when this workflow was switched. Blacksmith billing and Windows-runner access are managed through Blacksmith, separately from GitHub Team billing.
+## CI: Linux/Wine only
 
-The workflow no longer depends on `WINDOWS_16_CORE_READY` or a custom GitHub-hosted runner. Existing GitHub runner resources and `scripts/setup-hosted-runner.py` are retained as a fallback; they are not used by this workflow. Do not run the provisioning script to enable Blacksmith.
+The organization repository now has one build workflow: **Build Cartograph (Linux Wine)**. The native Windows workflow and its Windows-runner provisioning script have been removed. Existing repository history, the personal fork, and external runner resources are not deleted.
 
-Blacksmith includes Visual Studio Build Tools 2022 instead of the full IDE. The required engine/compiler compatibility must still be verified by the build. See <https://docs.blacksmith.sh/blacksmith-runners/overview> for current runner specifications.
+The workflow runs on push, published release, or manual dispatch using `blacksmith-32vcpu-ubuntu-2404` by default. It builds a **Windows Steam client package** for Satisfactory/Proton. Override `CARTOGRAPH_LINUX_RUNNER` only with an available compatible Linux x64 runner label.
 
-The Windows Wwise patch pre-build hook uses PowerShell 7 (`pwsh`), available on the CI image, rather than legacy Windows PowerShell. Local Windows builds of this organization branch also require PowerShell 7 on PATH. Execution-policy bypass is limited to that subprocess, not applied system-wide.
+Required repository secrets:
 
-The workflow follows [SML's Windows CI](https://github.com/satisfactorymodding/SatisfactoryModLoader/blob/v3.11.3/.github/workflows/build.yml) and [current SML CI](https://github.com/satisfactorymodding/SatisfactoryModLoader/blob/master/.github/workflows/build.yml): build the editor first, then invoke the CSS `PackagePlugin` command. It uses short `C:\cg` and `C:\ue` paths to avoid MSVC path-length limits. MSVC 14.38 (VS 17.8) is preferred; if unavailable, the workflow checks the installed compiler meets the minimum and lets UnrealBuildTool validate it. An earlier build accepted the preinstalled MSVC 14.44. The installer did not provide 14.38 on this image, so installing it is no longer a prerequisite. The current upstream CI uses Linux/Wine; this workflow retains the requested Blacksmith Windows runner.
+- `CSS_ENGINE_TOKEN`: read access to `satisfactorymodding/UnrealEngine`.
+- `WWISE_EMAIL` and `WWISE_PASSWORD`: Audiokinetic credentials.
 
-## Required Actions secrets
+`CSS_ENGINE_RELEASE` pins the engine release; the default is `5.6.1-css-83`. Never store credentials in Dockerfiles, source files, or cache snapshots.
 
-Under **Settings → Secrets and variables → Actions → Secrets**, add:
+## Aggressive persistent caching
 
-- `CSS_ENGINE_TOKEN`: a GitHub token from an account authorized to read `satisfactorymodding/UnrealEngine`. The workflow downloads the custom CSS Unreal Editor. This repository's default `GITHUB_TOKEN` cannot access that separate private repository.
-- `WWISE_EMAIL` and `WWISE_PASSWORD`: credentials for an authorized Audiokinetic account. The workflow downloads Wwise SDK `2023.1.14.8770` and integrates Unreal plugin version `2023.1.14.3555` using `wwise-cli`.
+Two Blacksmith sticky disks persist:
 
-These licensed dependencies cannot be downloaded without the relevant access. Do not commit credentials, engine files, or Wwise files to the repository.
+1. **Toolchains:** extracted CSS engine, engine build outputs, compiled/patched Wine, MSVC and Windows SDK plus downloads, Wwise SDK/cache, NuGet packages, and filesystem derived-data cache.
+2. **Branch-specific build tree:** generated headers, compiler intermediates, plugin binaries, integrated Wwise plugins, cooked data, staging outputs, and packaged ZIPs.
 
-Optionally set the **Actions variable** `CSS_ENGINE_RELEASE` to the engine release tag for `5.6.1-CSS`. Otherwise the latest release is used. The workflow rejects engine versions other than 5.6.1.
+APT downloads are additionally cached with `actions/cache`. Stable `/tmp/cg-cache` and `/tmp/cg` paths prevent cached MSVC and Unreal paths becoming invalid. Source synchronization uses content checksums so unchanged files keep their timestamps. Installation markers skip completed setup; incomplete compiles resume using their existing outputs. Both disks use `commit: on-change`.
 
-## Downloading the build
+Toolchain keys include the pinned engine release, dependency list, setup scripts, OS and architecture. Output keys also include the branch/ref and ABI/configuration inputs. Increment the `v1` cache-key schema in the workflow to force a reset, or delete specific snapshots through Blacksmith's dashboard. Cache reuse and speed improvements still need validation on the first cold and subsequent warm runs of this updated workflow.
 
-Open **Actions → Build Cartograph**, select a successful run, and download `Cartograph-Windows-<run>` under **Artifacts**. Artifacts are retained for 90 days. Published-release builds upload Actions artifacts, not release attachments.
+**Sticky disks are paid storage**, currently documented at $0.50/GB/month, with automatic eviction after seven days of inactivity. Large toolchain/output caches can occupy tens of GB. Manage them at <https://app.blacksmith.sh>.
 
-## Build limits
+This workflow intentionally has **no pull-request trigger**. Keep toolchain snapshots restricted to trusted organization runs; do not expose the cached engine/SDKs through public artifacts or images. Enable Blacksmith sticky-disk branch protection to constrain which branches can publish snapshots (default-branch runs only).
 
-Blacksmith's Windows runners have only 130 GB disk, even at 32 vCPU. Engine extraction and compilation must fit that disk and the six-hour job timeout. Downloaded engine archive parts are deleted after extraction to reclaim space. This configuration has not yet completed a build. CPU count alone does not fix disk, toolchain, or source-code errors.
+## Output
+
+Download `Cartograph-Windows-Wine-<run>` from a successful run's Artifacts section. It contains `Cartograph-Windows.zip` and the merged package. Artifacts are retained for 90 days; release-triggered runs create Actions artifacts, not release attachments.
