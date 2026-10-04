@@ -1,19 +1,16 @@
 # Building Cartograph in GitHub Actions
 
-This organization copy uses the **GitHub-hosted `cartograph-windows-16core` runner**, configured for Windows Server 2022 x64 with **16 cores, 64 GB RAM, and 600 GB SSD**. No self-hosted runner or personal Windows VM is required. It runs on pushes, published releases, and manual dispatches, builds the editor target, and packages the Windows client mod for Satisfactory (including Proton).
+This organization copy uses **Blacksmith's `blacksmith-32vcpu-windows-2025` runner**, with **32 vCPU, 112 GB RAM, and 130 GB disk**. Windows runners are currently a Blacksmith public beta. No self-hosted runner or personal Windows VM is required. It runs on pushes, published releases, and manual dispatches, builds the editor target, and packages the Windows client mod for Satisfactory (including Proton).
 
 The personal copy at `wadhah101/Cartograph` is preserved and continues to use the standard `windows-2022` runner.
 
-## Enable the paid 16-core runner
+## Blacksmith setup
 
-At preparation time, `wa101200` was on GitHub Free and the larger-runner API reported that hosted runners were not supported for the organization. This prevents provisioning the requested runner; changing the workflow label alone cannot bypass the restriction.
+Connect the organization at <https://app.blacksmith.sh> and grant the Blacksmith GitHub App access to `wa101200/Cartograph`. The organization already had the app installed for all repositories when this workflow was switched. Blacksmith billing and Windows-runner access are managed through Blacksmith, separately from GitHub Team billing.
 
-1. Enable an eligible plan (GitHub Team or Enterprise Cloud) and payment information for the organization. Configure an Actions spending budget that permits paid runs. Larger runners are billed per minute even for public repositories.
-2. With an organization-owner GitHub CLI login authorized to manage hosted runners and runner groups, run `python scripts/setup-hosted-runner.py`. The CLI token may need the classic `manage_runners:org` and `admin:org` scopes (or equivalent fine-grained permissions).
-3. The script discovers machine/image IDs, creates a runner group restricted to this repository, provisions the 16-core runner with maximum concurrency **one**, and sets `WINDOWS_16_CORE_READY=true` once it is Ready. If it is still provisioning, re-run the script after it becomes Ready.
-4. Manually start `Build Cartograph` in Actions. Until readiness is enabled, a small standard Linux job reports the setup requirement and prevents the Windows build from sitting in an endless queue.
+The workflow no longer depends on `WINDOWS_16_CORE_READY` or a custom GitHub-hosted runner. Existing GitHub runner resources and `scripts/setup-hosted-runner.py` are retained as a fallback; they are not used by this workflow. Do not run the provisioning script to enable Blacksmith.
 
-Alternatively, configure the same named runner in **Organization Settings → Actions → Runners → New GitHub-hosted runner**, grant this repository access, and set the readiness variable after it is Ready. Choose Windows **x64**, not ARM64.
+Blacksmith includes Visual Studio Build Tools 2022 instead of the full IDE. The required engine/compiler compatibility must still be verified by the build. See <https://docs.blacksmith.sh/blacksmith-runners/overview> for current runner specifications.
 
 ## Required Actions secrets
 
@@ -32,4 +29,4 @@ Open **Actions → Build Cartograph**, select a successful run, and download `Ca
 
 ## Build limits
 
-The 16-core runner provides substantially more disk and RAM than a standard runner, but download, extraction, and compilation must still fit the six-hour job timeout. This configuration has not yet completed a build. CPU count alone does not fix toolchain or source-code errors.
+Blacksmith's Windows runners have only 130 GB disk, even at 32 vCPU. Engine extraction and compilation must fit that disk and the six-hour job timeout. Downloaded engine archive parts are deleted after extraction to reclaim space. This configuration has not yet completed a build. CPU count alone does not fix disk, toolchain, or source-code errors.

@@ -14,23 +14,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check-runner:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check 16-core runner readiness
-        env:
-          RUNNER_READY: ${{ vars.WINDOWS_16_CORE_READY }}
-        run: |
-          if [ "$RUNNER_READY" != "true" ]; then
-            echo '::error::The 16-core hosted Windows runner is not enabled. Configure the organization runner and billing, then run scripts/setup-hosted-runner.py. See BUILDING.md.'
-            exit 1
-          fi
-
   build:
-    needs: check-runner
-    # This is an organization-configured GitHub-hosted runner name, not a
-    # standard label that GitHub automatically provisions.
-    runs-on: cartograph-windows-16core
+    # The Blacksmith GitHub App must have access to this repository.
+    runs-on: blacksmith-32vcpu-windows-2025
     timeout-minutes: 360
     defaults:
       run:
