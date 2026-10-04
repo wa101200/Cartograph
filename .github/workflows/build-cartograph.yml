@@ -2,6 +2,10 @@ name: Build Cartograph
 
 on:
   push:
+    paths-ignore:
+      - .github/workflows/build-cartograph-wine.yml
+      - .github/scripts/**
+      - LINUX_CI.md
   release:
     types: [published]
   workflow_dispatch:
@@ -11,7 +15,8 @@ permissions:
 
 concurrency:
   group: cartograph-build-${{ github.ref }}
-  cancel-in-progress: true
+  # Let the currently running Windows experiment finish while Linux CI is added.
+  cancel-in-progress: false
 
 jobs:
   build:
