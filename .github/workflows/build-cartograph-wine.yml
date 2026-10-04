@@ -118,6 +118,7 @@ jobs:
           python3 scripts/tests/test-build-local.py
           python3 scripts/tests/test-ci-cache.py
           python3 scripts/tests/test-wwise-image.py
+          python3 scripts/tests/test-ci-engine.py
 
       - name: Check dependency credentials
         env:
@@ -170,6 +171,7 @@ jobs:
         run: docker pull "$CARTOGRAPH_DOCKER_IMAGE"
 
       - name: Restore or provision toolchains inside Docker
+        timeout-minutes: 20
         env:
           GH_TOKEN: ${{ secrets.CSS_ENGINE_TOKEN }}
         run: bash .github/scripts/run-ci-container.sh

@@ -66,4 +66,6 @@ Toolchain keys include the pinned engine release, Docker inputs and engine setup
 
 Download `Cartograph-Windows-Wine-<run>` from a successful run's Artifacts section. ZIP artifacts are retained for 90 days; release-triggered runs do not automatically attach them to the release.
 
-The dependency-only image completed a local Docker build/package successfully. The SDK-inclusive image and its cold/warm CI runs need validation before claiming measured speed improvements.
+The dependency-only image completed a local Docker build/package successfully. Cold/warm runs of the combined image still need validation before claiming measured speed improvements.
+
+The SDK-inclusive image was built and published successfully, and a local full build using image-contained MSVC passed. The first CI attempt was cancelled after graphical engine registration stalled. Engine registration now writes the project association directly to `Install.ini` without launching `UnrealVersionSelector`/`zenity`. Provisioning has a 20-minute timeout. Full combined-image CI packaging remains unverified until a new run completes.
