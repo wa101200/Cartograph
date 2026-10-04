@@ -44,23 +44,19 @@ jobs:
           & pwsh -NoProfile -ExecutionPolicy Bypass -Command 'Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; Get-Command Unblock-File -ErrorAction Stop; $PSVersionTable.PSVersion'
           if ($LASTEXITCODE -ne 0) { throw 'PowerShell 7 security module is unavailable; the Wwise pre-build hook cannot run.' }
 
-      - name: Install preferred MSVC 14.38 toolchain
+      - name: Verify installed MSVC toolchain
         run: |
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           $vsRoot = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (!$vsRoot) { throw 'Visual Studio 2022 C++ build tools were not found.' }
           $toolchains = Join-Path $vsRoot 'VC\Tools\MSVC'
-          $preferred = Get-ChildItem $toolchains -Directory | Where-Object Name -Like '14.38.*'
-          if (!$preferred) {
-            $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\setup.exe'
-            $arguments = "modify --installPath `"$vsRoot`" --add Microsoft.VisualStudio.Component.VC.14.38.17.8 --quiet --norestart"
-            $process = Start-Process $installer -ArgumentList $arguments -Wait -PassThru
-            if ($process.ExitCode -notin @(0, 3010)) { throw "MSVC installation failed with exit code $($process.ExitCode)." }
+          $installed = Get-ChildItem $toolchains -Directory
+          $supported = $installed | Where-Object { [version]$_.Name -ge [version]'14.38.33130' }
+          if (!$supported) { throw 'No MSVC toolchain meeting the engine minimum 14.38.33130 was found.' }
+          if (!($installed | Where-Object Name -Like '14.38.*')) {
+            Write-Output '::warning::Preferred MSVC 14.38 is absent. Using the installed compiler; UnrealBuildTool will validate compatibility. The earlier build accepted MSVC 14.44.'
           }
-          if (!(Get-ChildItem $toolchains -Directory | Where-Object Name -Like '14.38.*')) {
-            throw 'The preferred MSVC 14.38 compiler was not installed.'
-          }
-          Get-ChildItem $toolchains -Directory | Select-Object Name
+          $installed | Select-Object Name
 
       - name: Check dependency credentials
         env:
