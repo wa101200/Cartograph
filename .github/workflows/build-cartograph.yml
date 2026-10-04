@@ -15,9 +15,7 @@ concurrency:
 
 jobs:
   build:
-    # The CSS Unreal Engine and Wwise SDK are licensed, large dependencies;
-    # use a Windows VM with the Satisfactory modding toolchain installed.
-    runs-on: [self-hosted, windows, x64, satisfactory-mod-builder]
+    runs-on: windows-2022
     timeout-minutes: 360
     defaults:
       run:
@@ -29,57 +27,70 @@ jobs:
         with:
           path: project
 
-      - name: Validate build dependencies
+      - name: Check dependency credentials
+        env:
+          GH_TOKEN: ${{ secrets.CSS_ENGINE_TOKEN }}
+          WWISE_EMAIL: ${{ secrets.WWISE_EMAIL }}
+          WWISE_PASSWORD: ${{ secrets.WWISE_PASSWORD }}
+        run: |
+          $missing = @()
+          if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) { $missing += 'CSS_ENGINE_TOKEN' }
+          if ([string]::IsNullOrWhiteSpace($env:WWISE_EMAIL)) { $missing += 'WWISE_EMAIL' }
+          if ([string]::IsNullOrWhiteSpace($env:WWISE_PASSWORD)) { $missing += 'WWISE_PASSWORD' }
+          if ($missing.Count -gt 0) {
+            throw "Add repository Actions secrets: $($missing -join ', '). CSS_ENGINE_TOKEN needs authorized access to satisfactorymodding/UnrealEngine; the default GITHUB_TOKEN cannot access that private repository."
+          }
+          gh api repos/satisfactorymodding/UnrealEngine --jq '.full_name'
+          if ($LASTEXITCODE -ne 0) { throw 'CSS_ENGINE_TOKEN does not have access to the custom engine repository.' }
+
+      - name: Download and extract CSS Unreal Engine
+        env:
+          GH_TOKEN: ${{ secrets.CSS_ENGINE_TOKEN }}
+          ENGINE_RELEASE: ${{ vars.CSS_ENGINE_RELEASE }}
+        run: |
+          $engineRoot = Join-Path $env:RUNNER_TEMP 'ue'
+          New-Item -ItemType Directory -Force -Path $engineRoot | Out-Null
+          $arguments = @('release', 'download', '--repo', 'satisfactorymodding/UnrealEngine',
+            '--pattern', 'UnrealEngine-CSS-Editor-Win64.7z.*', '--dir', $engineRoot)
+          if (![string]::IsNullOrWhiteSpace($env:ENGINE_RELEASE)) { $arguments += $env:ENGINE_RELEASE }
+          gh @arguments
+          if ($LASTEXITCODE -ne 0) { throw 'Engine download failed. Check CSS_ENGINE_RELEASE and availability of the Windows editor archive.' }
+          $firstPart = Join-Path $engineRoot 'UnrealEngine-CSS-Editor-Win64.7z.001'
+          if (!(Test-Path $firstPart)) { throw 'The Windows editor split archive was not found.' }
+          & 7z x $firstPart "-o$engineRoot" -y
+          if ($LASTEXITCODE -ne 0) { throw 'Engine extraction failed; check the runner disk-space and archive format.' }
+          # Remove only downloaded archive parts, after successful extraction.
+          Get-ChildItem $engineRoot -Filter 'UnrealEngine-CSS-Editor-Win64.7z.*' -File | Remove-Item
+          $version = Get-Content (Join-Path $engineRoot 'Engine\Build\Build.version') -Raw | ConvertFrom-Json
+          if ($version.MajorVersion -ne 5 -or $version.MinorVersion -ne 6 -or $version.PatchVersion -ne 1) {
+            throw 'Downloaded engine is not 5.6.1. Set CSS_ENGINE_RELEASE to the matching CSS release tag.'
+          }
+          "UE_CSS_ROOT=$engineRoot" >> $env:GITHUB_ENV
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name,Used,Free
+
+      - name: Download and integrate Wwise
         working-directory: project
         env:
-          UE_CSS_ROOT: ${{ vars.UE_CSS_ROOT }}
-          WWISE_PLUGIN_PATH: ${{ vars.WWISE_PLUGIN_PATH }}
-          WWISE_NIAGARA_PLUGIN_PATH: ${{ vars.WWISE_NIAGARA_PLUGIN_PATH }}
+          GH_TOKEN: ${{ github.token }}
+          WWISE_EMAIL: ${{ secrets.WWISE_EMAIL }}
+          WWISE_PASSWORD: ${{ secrets.WWISE_PASSWORD }}
         run: |
-          $engineRoot = $env:UE_CSS_ROOT
-          if ([string]::IsNullOrWhiteSpace($engineRoot)) {
-            $engineRoot = 'C:\Program Files\Unreal Engine - CSS'
-          }
-
-          $buildScript = Join-Path $engineRoot 'Engine\Build\BatchFiles\Build.bat'
-          $uatScript = Join-Path $engineRoot 'Engine\Build\BatchFiles\RunUAT.bat'
-          if (!(Test-Path $buildScript) -or !(Test-Path $uatScript)) {
-            throw "Unreal Engine CSS 5.6.1 was not found at '$engineRoot'. Set the UE_CSS_ROOT Actions variable or install the engine at the default path."
-          }
-
-          $wwiseSource = $env:WWISE_PLUGIN_PATH
-          if (![string]::IsNullOrWhiteSpace($wwiseSource)) {
-            if (!(Test-Path (Join-Path $wwiseSource 'Wwise.uplugin'))) {
-              throw "WWISE_PLUGIN_PATH must point to the folder containing Wwise.uplugin: '$wwiseSource'"
-            }
-            $destination = Join-Path $PWD 'Plugins\Wwise'
-            New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
-            Copy-Item -Path $wwiseSource -Destination $destination -Recurse -Force
-          }
-
-          $wwiseNiagaraSource = $env:WWISE_NIAGARA_PLUGIN_PATH
-          if ([string]::IsNullOrWhiteSpace($wwiseNiagaraSource) -and ![string]::IsNullOrWhiteSpace($wwiseSource)) {
-            $wwiseNiagaraSource = Join-Path (Split-Path $wwiseSource -Parent) 'WwiseNiagara'
-          }
-          if (![string]::IsNullOrWhiteSpace($wwiseNiagaraSource) -and (Test-Path (Join-Path $wwiseNiagaraSource 'WwiseNiagara.uplugin'))) {
-            $destination = Join-Path $PWD 'Plugins\WwiseNiagara'
-            New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
-            Copy-Item -Path $wwiseNiagaraSource -Destination $destination -Recurse -Force
-          }
-
+          $cli = Join-Path $env:RUNNER_TEMP 'wwise-cli.exe'
+          gh release download v0.2.4 --repo mircearoata/wwise-cli --pattern wwise-cli_windows_amd64.exe --output $cli
+          if ($LASTEXITCODE -ne 0) { throw 'wwise-cli download failed.' }
+          # Do not log signed download URLs or account authentication output.
+          & $cli download --sdk-version '2023.1.14.8770' --filter Packages=SDK `
+            --filter DeploymentPlatforms=Windows_vc160 --filter DeploymentPlatforms=Windows_vc170 `
+            --filter DeploymentPlatforms= > $null
+          if ($LASTEXITCODE -ne 0) { throw 'Wwise SDK download failed.' }
+          & $cli integrate-ue --integration-version '2023.1.14.3555' --project (Join-Path $PWD 'FactoryGame.uproject') > $null
+          if ($LASTEXITCODE -ne 0) { throw 'Wwise project integration failed.' }
           if (!(Test-Path (Join-Path $PWD 'Plugins\Wwise\Wwise.uplugin'))) {
-            throw 'Wwise is missing. Install the project Wwise plugin on the runner and set the WWISE_PLUGIN_PATH Actions variable to its folder.'
+            throw 'Wwise integration did not create Plugins/Wwise/Wwise.uplugin.'
           }
           if (!(Test-Path (Join-Path $PWD 'Plugins\WwiseNiagara\WwiseNiagara.uplugin'))) {
-            throw 'WwiseNiagara is missing. Install it alongside Wwise or set the WWISE_NIAGARA_PLUGIN_PATH Actions variable.'
+            throw 'Wwise integration did not create Plugins/WwiseNiagara/WwiseNiagara.uplugin.'
           }
-
-          $uproject = Get-Content 'FactoryGame.uproject' -Raw | ConvertFrom-Json
-          if ($uproject.EngineAssociation -ne '5.6.1-CSS') {
-            throw "Unexpected EngineAssociation '$($uproject.EngineAssociation)'; this workflow requires 5.6.1-CSS."
-          }
-
-          "UE_CSS_ROOT=$engineRoot" >> $env:GITHUB_ENV
 
       - name: Build editor target
         working-directory: project
