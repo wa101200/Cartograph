@@ -1,0 +1,126 @@
+name: Build Cartograph
+
+on:
+  push:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cartograph-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # The CSS Unreal Engine and Wwise SDK are licensed, large dependencies;
+    # use a Windows VM with the Satisfactory modding toolchain installed.
+    runs-on: [self-hosted, windows, x64, satisfactory-mod-builder]
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          path: project
+
+      - name: Validate build dependencies
+        working-directory: project
+        env:
+          UE_CSS_ROOT: ${{ vars.UE_CSS_ROOT }}
+          WWISE_PLUGIN_PATH: ${{ vars.WWISE_PLUGIN_PATH }}
+          WWISE_NIAGARA_PLUGIN_PATH: ${{ vars.WWISE_NIAGARA_PLUGIN_PATH }}
+        run: |
+          $engineRoot = $env:UE_CSS_ROOT
+          if ([string]::IsNullOrWhiteSpace($engineRoot)) {
+            $engineRoot = 'C:\Program Files\Unreal Engine - CSS'
+          }
+
+          $buildScript = Join-Path $engineRoot 'Engine\Build\BatchFiles\Build.bat'
+          $uatScript = Join-Path $engineRoot 'Engine\Build\BatchFiles\RunUAT.bat'
+          if (!(Test-Path $buildScript) -or !(Test-Path $uatScript)) {
+            throw "Unreal Engine CSS 5.6.1 was not found at '$engineRoot'. Set the UE_CSS_ROOT Actions variable or install the engine at the default path."
+          }
+
+          $wwiseSource = $env:WWISE_PLUGIN_PATH
+          if (![string]::IsNullOrWhiteSpace($wwiseSource)) {
+            if (!(Test-Path (Join-Path $wwiseSource 'Wwise.uplugin'))) {
+              throw "WWISE_PLUGIN_PATH must point to the folder containing Wwise.uplugin: '$wwiseSource'"
+            }
+            $destination = Join-Path $PWD 'Plugins\Wwise'
+            New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
+            Copy-Item -Path $wwiseSource -Destination $destination -Recurse -Force
+          }
+
+          $wwiseNiagaraSource = $env:WWISE_NIAGARA_PLUGIN_PATH
+          if ([string]::IsNullOrWhiteSpace($wwiseNiagaraSource) -and ![string]::IsNullOrWhiteSpace($wwiseSource)) {
+            $wwiseNiagaraSource = Join-Path (Split-Path $wwiseSource -Parent) 'WwiseNiagara'
+          }
+          if (![string]::IsNullOrWhiteSpace($wwiseNiagaraSource) -and (Test-Path (Join-Path $wwiseNiagaraSource 'WwiseNiagara.uplugin'))) {
+            $destination = Join-Path $PWD 'Plugins\WwiseNiagara'
+            New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
+            Copy-Item -Path $wwiseNiagaraSource -Destination $destination -Recurse -Force
+          }
+
+          if (!(Test-Path (Join-Path $PWD 'Plugins\Wwise\Wwise.uplugin'))) {
+            throw 'Wwise is missing. Install the project Wwise plugin on the runner and set the WWISE_PLUGIN_PATH Actions variable to its folder.'
+          }
+          if (!(Test-Path (Join-Path $PWD 'Plugins\WwiseNiagara\WwiseNiagara.uplugin'))) {
+            throw 'WwiseNiagara is missing. Install it alongside Wwise or set the WWISE_NIAGARA_PLUGIN_PATH Actions variable.'
+          }
+
+          $uproject = Get-Content 'FactoryGame.uproject' -Raw | ConvertFrom-Json
+          if ($uproject.EngineAssociation -ne '5.6.1-CSS') {
+            throw "Unexpected EngineAssociation '$($uproject.EngineAssociation)'; this workflow requires 5.6.1-CSS."
+          }
+
+          "UE_CSS_ROOT=$engineRoot" >> $env:GITHUB_ENV
+
+      - name: Build editor target
+        working-directory: project
+        run: |
+          $projectFile = Join-Path $PWD 'FactoryGame.uproject'
+          $buildScript = Join-Path $env:UE_CSS_ROOT 'Engine\Build\BatchFiles\Build.bat'
+          & $buildScript FactoryEditor Win64 Development "-project=$projectFile" -WaitMutex
+          if ($LASTEXITCODE -ne 0) {
+            throw "FactoryEditor build failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Package Cartograph Windows client
+        working-directory: project
+        run: |
+          $projectFile = Join-Path $PWD 'FactoryGame.uproject'
+          $uatScript = Join-Path $env:UE_CSS_ROOT 'Engine\Build\BatchFiles\RunUAT.bat'
+          & $uatScript "-ScriptsForProject=$projectFile" PackagePlugin "-project=$projectFile" `
+            '-clientconfig=Shipping' '-serverconfig=Shipping' '-DLCName=Cartograph' `
+            '-build' '-platform=Win64' '-nocompileeditor' '-installed' '-merge'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Cartograph packaging failed with exit code $LASTEXITCODE"
+          }
+
+          $archiveRoot = Join-Path $PWD 'Saved\ArchivedPlugins'
+          $packages = Get-ChildItem $archiveRoot -Filter '*.zip' -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'Cartograph' } |
+            Sort-Object LastWriteTime -Descending
+          if (!$packages) {
+            throw "No Cartograph package ZIP was produced under '$archiveRoot'."
+          }
+
+          $artifactDirectory = Join-Path $PWD 'artifacts'
+          New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
+          Copy-Item $packages[0].FullName (Join-Path $artifactDirectory 'Cartograph-Windows.zip') -Force
+          Get-Item (Join-Path $artifactDirectory 'Cartograph-Windows.zip') | Format-List FullName,Length
+
+      - name: Upload packaged mod
+        uses: actions/upload-artifact@v7
+        with:
+          name: Cartograph-Windows-${{ github.run_number }}
+          path: project/artifacts/Cartograph-Windows.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
