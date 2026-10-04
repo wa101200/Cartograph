@@ -11,7 +11,7 @@ import subprocess
 
 ORG = "wa101200"
 REPO = f"{ORG}/Cartograph"
-NAME = "cartograph-windows-64core"
+NAME = "cartograph-windows-16core"
 
 
 def api(path, payload=None):
@@ -50,11 +50,11 @@ def main():
             )
         sizes = api(f"{base}/hosted-runners/machine-sizes")["machine_specs"]
         size = next(
-            (s for s in sizes if s["cpu_cores"] == 64 and s["memory_gb"] == 256),
+            (s for s in sizes if s["cpu_cores"] == 16 and s["memory_gb"] == 64),
             None,
         )
         if size is None:
-            raise SystemExit("No 64-core / 256-GB x64 machine size is available.")
+            raise SystemExit("No 16-core / 64-GB x64 machine size is available.")
         repo_id = api(f"repos/{REPO}")["id"]
         groups = api(f"{base}/runner-groups?per_page=100")["runner_groups"]
         group = next((g for g in groups if g["name"] == NAME), None)
@@ -80,8 +80,8 @@ def main():
             },
         )
     specs = runner["machine_size_details"]
-    if runner["platform"] not in ("win-x64", "windows-x64") or specs["cpu_cores"] != 64 or specs["memory_gb"] != 256:
-        raise SystemExit("The existing runner is not the requested Windows x64 64-core / 256-GB runner.")
+    if runner["platform"] not in ("win-x64", "windows-x64") or specs["cpu_cores"] != 16 or specs["memory_gb"] != 64:
+        raise SystemExit("The existing runner is not the requested Windows x64 16-core / 64-GB runner.")
     if runner.get("maximum_runners") != 1:
         raise SystemExit("Existing runner concurrency must be set to one before enabling builds.")
     print(f"{NAME}: {runner['status']}; specs: {specs}")
@@ -89,10 +89,10 @@ def main():
         print("Provisioning is not complete. Re-run this script once the runner is Ready.")
         return
     subprocess.run(
-        ["gh", "variable", "set", "WINDOWS_64_CORE_READY", "--repo", REPO, "--body", "true"],
+        ["gh", "variable", "set", "WINDOWS_16_CORE_READY", "--repo", REPO, "--body", "true"],
         check=True,
     )
-    print("64-core builds enabled. Start Build Cartograph from the Actions page.")
+    print("16-core builds enabled. Start Build Cartograph from the Actions page.")
 
 
 if __name__ == "__main__":

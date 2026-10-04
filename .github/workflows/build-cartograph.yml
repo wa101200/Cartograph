@@ -17,12 +17,12 @@ jobs:
   check-runner:
     runs-on: ubuntu-latest
     steps:
-      - name: Check 64-core runner readiness
+      - name: Check 16-core runner readiness
         env:
-          RUNNER_READY: ${{ vars.WINDOWS_64_CORE_READY }}
+          RUNNER_READY: ${{ vars.WINDOWS_16_CORE_READY }}
         run: |
           if [ "$RUNNER_READY" != "true" ]; then
-            echo '::error::The 64-core hosted Windows runner is not enabled. Upgrade the organization to an eligible plan, configure billing, then run scripts/setup-hosted-runner.py. See BUILDING.md.'
+            echo '::error::The 16-core hosted Windows runner is not enabled. Configure the organization runner and billing, then run scripts/setup-hosted-runner.py. See BUILDING.md.'
             exit 1
           fi
 
@@ -30,7 +30,7 @@ jobs:
     needs: check-runner
     # This is an organization-configured GitHub-hosted runner name, not a
     # standard label that GitHub automatically provisions.
-    runs-on: cartograph-windows-64core
+    runs-on: cartograph-windows-16core
     timeout-minutes: 360
     defaults:
       run:
