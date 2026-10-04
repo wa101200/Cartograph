@@ -16,7 +16,7 @@ concurrency:
 jobs:
   image:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
@@ -42,6 +42,20 @@ jobs:
           else
             echo 'exists=false' >> "$GITHUB_OUTPUT"
           fi
+      - name: Require private toolchain package storage
+        if: steps.image.outputs.exists != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Newly created GHCR packages are private. Refuse to add SDK layers
+          # to an existing public package, even if an administrator changed it.
+          if gh api orgs/wa101200/packages/container/cartograph-toolchain > package.json 2>package-error.txt; then
+            test "$(jq -r .visibility package.json)" = private
+          elif ! grep -q 'HTTP 404' package-error.txt; then
+            cat package-error.txt >&2
+            exit 1
+          fi
       - name: Restore Docker build layers
         if: steps.image.outputs.exists != 'true'
         uses: useblacksmith/setup-docker-builder@v2
@@ -57,6 +71,9 @@ jobs:
           push: true
           tags: ${{ steps.image.outputs.ref }}
           provenance: false
+          secrets: |
+            WWISE_EMAIL=${{ secrets.WWISE_EMAIL }}
+            WWISE_PASSWORD=${{ secrets.WWISE_PASSWORD }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
       - name: Pin the image digest for the build
@@ -84,7 +101,6 @@ jobs:
       CARTOGRAPH_BUILD_ROOT: /tmp/cg-cache
       PROJECT_ROOT: /tmp/cg
       UE_CSS_ROOT: /tmp/cg-cache/ue
-      UE_WINE_MSVC: /tmp/cg-cache/msvc
       WINEPREFIX: /tmp/cg-cache/docker-wine-prefix
       WINEARCH: win64
       WINEDEBUG: -all
@@ -101,14 +117,13 @@ jobs:
         run: |
           python3 scripts/tests/test-build-local.py
           python3 scripts/tests/test-ci-cache.py
+          python3 scripts/tests/test-wwise-image.py
 
       - name: Check dependency credentials
         env:
           GH_TOKEN: ${{ secrets.CSS_ENGINE_TOKEN }}
-          WWISE_EMAIL: ${{ secrets.WWISE_EMAIL }}
-          WWISE_PASSWORD: ${{ secrets.WWISE_PASSWORD }}
         run: |
-          for name in GH_TOKEN WWISE_EMAIL WWISE_PASSWORD; do
+          for name in GH_TOKEN; do
             if [ -z "${!name}" ]; then
               echo "::error::Missing dependency credential: $name."
               exit 1
@@ -127,7 +142,7 @@ jobs:
           echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
           echo "outputs=$outputs" >> "$GITHUB_OUTPUT"
 
-      - name: Restore engine, MSVC, Wwise, NuGet and cooking cache
+      - name: Restore engine, NuGet, Wine prefix and cooking cache
         uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1
         with:
           key: cartograph-${{ github.repository_id }}-tools-${{ steps.keys.outputs.toolchain }}
@@ -157,8 +172,6 @@ jobs:
       - name: Restore or provision toolchains inside Docker
         env:
           GH_TOKEN: ${{ secrets.CSS_ENGINE_TOKEN }}
-          WWISE_EMAIL: ${{ secrets.WWISE_EMAIL }}
-          WWISE_PASSWORD: ${{ secrets.WWISE_PASSWORD }}
         run: bash .github/scripts/run-ci-container.sh
 
       - name: Build and package using the local Docker entrypoint

@@ -7,53 +7,63 @@
 ./scripts/build-local.sh
 ```
 
-All local Wine/compiler/Unreal processes run inside the dependency container. There is no native fallback, and the container-side script rejects direct host execution. The host needs Docker and the toolchain files, not Wine or compiler packages. See [LOCAL_BUILD.md](LOCAL_BUILD.md).
+See [LOCAL_BUILD.md](LOCAL_BUILD.md). The host needs Docker and the CSS engine, not Wine/MSVC/Wwise installations. Native builds are rejected by the inner script.
 
-## CI: Linux/Wine only
+## CI: same Docker image and entrypoint
 
-The organization repository now has one build workflow: **Build Cartograph (Linux Wine)**. The native Windows workflow and its Windows-runner provisioning script have been removed. Existing repository history, the personal fork, and external runner resources are not deleted.
+**Build Cartograph (Linux Wine)** is the only build workflow. Windows CI and its provisioning script were removed; the personal fork and external runner resources were not deleted.
 
-The workflow runs on push, published release, or manual dispatch. A small `blacksmith-4vcpu-ubuntu-2404` job publishes the shared dependency image to GHCR only when the Docker inputs change. The build job uses `blacksmith-32vcpu-ubuntu-2404` by default and calls the same `scripts/build-local.sh` entrypoint used locally. It builds a **Windows Steam client package** for Satisfactory/Proton. Override `CARTOGRAPH_LINUX_RUNNER` only with an available compatible Linux x64 runner label.
+The workflow runs on push, published release and manual dispatch:
 
-CI and local builds use `docker/Dockerfile`: Ubuntu 24.04 and prebuilt stock Wine 11.0. CI no longer installs APT packages or compiles Wine on the runner. `scripts/docker-image-ref.sh` computes a content-addressed GHCR tag from the Dockerfile and Docker context filter; CI resolves that tag to a digest before starting any build container. Image publishing requires `packages: write` on the image job's `GITHUB_TOKEN`; builds require only `packages: read`. Package access must permit this repository's Actions token.
+1. A small `blacksmith-4vcpu-ubuntu-2404` image job publishes the shared toolchain image **only when image inputs change**.
+2. The build job defaults to `blacksmith-32vcpu-ubuntu-2404` (32 vCPU, 128 GB RAM, 1.5 TB disk), restores sticky disks, and provisions the CSS engine in Docker.
+3. It calls the same `scripts/build-local.sh` used locally to compile the Linux editor and package the **Windows Steam mod** for Satisfactory/Proton.
 
-Required repository secrets:
+Override `CARTOGRAPH_LINUX_RUNNER` only with an available compatible Linux x64 runner label.
 
-- `CSS_ENGINE_TOKEN`: read access to `satisfactorymodding/UnrealEngine`.
-- `WWISE_EMAIL` and `WWISE_PASSWORD`: Audiokinetic credentials.
+## Image contents and publication
 
-`CSS_ENGINE_RELEASE` pins the engine release; the default is `5.6.1-css-83`. Never store credentials in Dockerfiles, source files, or cache snapshots.
+**`ghcr.io/wa101200/cartograph-toolchain`** includes Ubuntu 24.04, stock Wine 11.0, MSVC 17.8, Windows SDK 10.0.22621, PDBCopy, Wwise CLI, and ready-to-copy Wwise plugin/SDK templates for UE 5.6. CI no longer runs APT installation, Wine compilation, MSVC installation, or Wwise downloads/integration on each runner.
+
+`scripts/docker-image-ref.sh` hashes the Dockerfile, context filter and SDK installer scripts to select a content-addressed tag. CI resolves the published tag to a digest before starting build containers.
+
+**Keep the package private.** The workflow refuses to publish SDK layers into an existing public package. The image job needs `packages: write`; the build job needs only `packages: read`. Package access must permit this repository's Actions token. There is no pull-request trigger.
+
+MSVC and Wwise use independent image-build stages, so changing one does not rebuild the other. MSVC downloads also use a persistent BuildKit cache mount. Wwise uses metadata-only UE 5.6 registration to prepare the integration: no full engine is needed for this step. Only finished compiler files and Wwise templates are copied to the final image, not temporary registration files, downloader caches or credentials.
+
+Required secrets:
+
+- `CSS_ENGINE_TOKEN`: read access to `satisfactorymodding/UnrealEngine`, used during engine setup.
+- `WWISE_EMAIL`, `WWISE_PASSWORD`: used **only when building a new image**, through BuildKit secret mounts.
+
+`CSS_ENGINE_RELEASE` pins the CSS engine release (default `5.6.1-css-83`). Never put credentials in source, Docker build arguments or cache snapshots.
 
 ## Aggressive persistent caching
 
-Two Blacksmith sticky disks persist:
+Two Blacksmith sticky disks use `commit: on-change`:
 
-1. **Toolchains:** extracted CSS engine, engine build outputs, MSVC and Windows SDK plus downloads, Wwise SDK/cache, NuGet packages, filesystem derived-data cache, container HOME, temporary downloads, and the Wine prefix.
-2. **Branch-specific build tree:** generated headers, compiler intermediates, plugin binaries, integrated Wwise plugins, cooked data, staging outputs, and packaged ZIPs.
-
-Stable `/tmp/cg-cache` and `/tmp/cg` paths prevent cached MSVC and Unreal paths becoming invalid. Source synchronization uses content checksums without resetting timestamps. Installation markers skip completed setup; incomplete compiles resume using their existing outputs. Both disks use `commit: on-change`.
-
-| Container path / mount | Persistent contents |
+| Mount / path | Cached contents |
 | --- | --- |
-| `/tmp/cg` (read/write build disk) | Project, `Binaries`, all `Intermediate` trees, `Saved/Cooked`, staging, packaged ZIPs, Wwise plugins |
-| `/tmp/cg-cache` (read/write toolchain disk) | Engine (including its generated files), MSVC/SDK, downloaded installers, Wwise CLI |
-| `/tmp/cg-cache/docker-home` | Unreal configuration, engine registration, logs, and `ddc/` filesystem cache |
-| `/tmp/cg-cache/cache` | `XDG_CACHE_HOME`: Wwise downloads and general runtime caches |
+| `/tmp/cg` (read/write project disk) | Source, Wwise plugins, generated headers, all compiler intermediates, binaries, cooked data, staging and packaged ZIPs |
+| `/tmp/cg-cache` (read/write engine/cache disk) | CSS engine and its generated files, runtime state and the directories below |
+| `/tmp/cg-cache/docker-home` | Unreal configuration/logs and engine registration |
+| `/tmp/cg-cache/docker-home/ddc` | Writable filesystem derived-data cache |
+| `/tmp/cg-cache/docker-wine-prefix` | Persistent Wine registry/initialization state |
 | `/tmp/cg-cache/nuget` | .NET package cache (`NUGET_PACKAGES`) |
-| `/tmp/cg-cache/tmp` | Temporary toolchain downloads and extraction files (`TMPDIR`) |
-| `/tmp/cg-cache/docker-wine-prefix` | Persistent Wine registry and initialization state |
-| Runner checkout (read-only) | Current Git metadata referenced by the cached project's temporary `.git` link |
+| `/tmp/cg-cache/cache` | General runtime caches (`XDG_CACHE_HOME`) |
+| `/tmp/cg-cache/tmp` | Temporary downloads and extraction files (`TMPDIR`) |
+| Runner checkout (read-only) | Git metadata referenced by the cached project's temporary `.git` link |
+| `/opt/cartograph/msvc` (image, **not** a bind mount) | Installed compiler/Windows SDK/PDBCopy |
+| `/opt/cartograph/wwise-plugins` (image, **not** a bind mount) | Immutable SDK/plugin templates, copied into the project once |
 
-The subdirectories above are all covered by the toolchain bind mount; no nested anonymous volumes hide them. Provisioning and compilation use the same paths and non-root UID. Build containers do **not** receive registry login files or the Docker socket. The Wine prefix is stopped cleanly after each container exits.
+All state subdirectories are covered by the two main mounts. Stable absolute paths preserve compiler references; checksum-based source synchronization without timestamp updates keeps unchanged inputs warm. The shared build script owns UBT configuration and changes it only when necessary. Wine processes are stopped cleanly when containers exit. Build containers do not receive registry credentials or the Docker socket.
 
-Blacksmith automatically caches pulled Docker images for free, including digest-pinned GHCR images. Image builds use `useblacksmith/setup-docker-builder` and its persistent build-layer cache; there is no per-run image rebuild or APT restore.
+Blacksmith caches pulled Docker images automatically at no storage charge. Image publishing uses its persistent Docker-layer cache. Sticky disks and Docker **build-layer** caches are paid storage, currently documented at $0.50/GB/month, with inactivity eviction. Manage them at <https://app.blacksmith.sh>.
 
-Toolchain keys include the pinned engine release, Docker inputs, setup scripts, and architecture. Output keys also include the branch/ref and ABI/configuration inputs. Increment the `v2` cache-key schema in the workflow to force a reset, or delete specific snapshots through Blacksmith's dashboard. Cache reuse and speed improvements require cold and subsequent warm runs of this updated workflow.
+Toolchain keys include the pinned engine release, Docker inputs and engine setup script. Output keys also include branch/ref and ABI/configuration inputs. Increment the `v2` schema in the workflow or remove selected snapshots through Blacksmith to reset caches. Keep snapshots restricted to trusted organization runs; enable sticky-disk branch protection for default-branch publication.
 
-**Sticky disks are paid storage**, currently documented at $0.50/GB/month, with automatic eviction after seven days of inactivity. Large toolchain/output caches can occupy tens of GB. Manage them at <https://app.blacksmith.sh>.
+## Output and validation
 
-This workflow intentionally has **no pull-request trigger**. Keep toolchain snapshots restricted to trusted organization runs; do not expose the cached engine/SDKs through public artifacts or images. Enable Blacksmith sticky-disk branch protection to constrain which branches can publish snapshots (default-branch runs only).
+Download `Cartograph-Windows-Wine-<run>` from a successful run's Artifacts section. ZIP artifacts are retained for 90 days; release-triggered runs do not automatically attach them to the release.
 
-## Output
-
-Download `Cartograph-Windows-Wine-<run>` from a successful run's Artifacts section. It contains `Cartograph-Windows.zip` and the merged package. Artifacts are retained for 90 days; release-triggered runs create Actions artifacts, not release attachments.
+The dependency-only image completed a local Docker build/package successfully. The SDK-inclusive image and its cold/warm CI runs need validation before claiming measured speed improvements.

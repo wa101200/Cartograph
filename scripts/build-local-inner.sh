@@ -11,7 +11,7 @@ project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project="$project_root/FactoryGame.uproject"
 export CARTOGRAPH_BUILD_ROOT="${CARTOGRAPH_BUILD_ROOT:-$HOME/.local/share/cartograph-build}"
 export UE_CSS_ROOT="${UE_CSS_ROOT:-$CARTOGRAPH_BUILD_ROOT/ue}"
-export UE_WINE_MSVC="${UE_WINE_MSVC:-$CARTOGRAPH_BUILD_ROOT/msvc}"
+export UE_WINE_MSVC="${UE_WINE_MSVC:-/opt/cartograph/msvc}"
 export WINEPREFIX="${WINEPREFIX:-$CARTOGRAPH_BUILD_ROOT/wine-prefix}"
 export WINEARCH="${WINEARCH:-win64}"
 export WINEDEBUG="${WINEDEBUG:--all}"
@@ -55,16 +55,7 @@ if [ "${1:-}" = --check ]; then
   exit 0
 fi
 
-if [ ! -f Plugins/Wwise/Wwise.uplugin ] || [ ! -f Plugins/WwiseNiagara/WwiseNiagara.uplugin ]; then
-  cli="$CARTOGRAPH_BUILD_ROOT/wwise-cli"
-  if [ ! -x "$cli" ]; then
-    echo "Wwise is missing; install wwise-cli and download its SDK first. See LOCAL_BUILD.md." >&2
-    exit 1
-  fi
-  xvfb-run -a "$UE_CSS_ROOT/Engine/Binaries/Linux/UnrealVersionSelector" -register -unattended
-  # Existing SDK cache or environment credentials are used by wwise-cli.
-  "$cli" integrate-ue --integration-version '2023.1.14.3555' --project "$project" > /dev/null
-fi
+bash "$project_root/scripts/install-wwise-from-image.sh" "$project_root"
 
 # These settings also apply to the shipping build invoked internally by Alpakit.
 # Preserve unrelated existing project-local UBT settings.

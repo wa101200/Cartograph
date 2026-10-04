@@ -14,7 +14,7 @@ Optional environment variables:
   JOBS                    Parallel compiler actions (default: all host CPUs).
   CARTOGRAPH_BUILD_ROOT   Toolchain root (default: ~/.local/share/cartograph-build).
   UE_CSS_ROOT             CSS engine folder (default: BUILD_ROOT/ue).
-  UE_WINE_MSVC            MSVC folder (default: BUILD_ROOT/msvc).
+  UE_WINE_MSVC            Optional host MSVC override (default: image /opt/cartograph/msvc).
   CARTOGRAPH_DOCKER_IMAGE Existing compatible image (default: shared GHCR image).
   CARTOGRAPH_WINEPREFIX   Dedicated Docker Wine prefix (default: BUILD_ROOT/docker-wine-prefix).
   CARTOGRAPH_CACHE_HOME   Persistent general/Wwise cache (default: BUILD_ROOT/cache).
@@ -48,19 +48,23 @@ esac
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_root="${CARTOGRAPH_BUILD_ROOT:-$HOME/.local/share/cartograph-build}"
 engine_root="${UE_CSS_ROOT:-$build_root/ue}"
-msvc_root="${UE_WINE_MSVC:-$build_root/msvc}"
+msvc_root="${UE_WINE_MSVC:-/opt/cartograph/msvc}"
 image="${CARTOGRAPH_DOCKER_IMAGE:-$(bash "$project_root/scripts/docker-image-ref.sh")}"
 jobs="${JOBS:-$(nproc)}"
 if [[ ! "$jobs" =~ ^[1-9][0-9]*$ ]]; then echo 'JOBS must be a positive integer.' >&2; exit 1; fi
 
 # Canonical paths are mounted unchanged so MSVC wrappers and cached build paths
 # continue to resolve, including SDK paths emitted by msvc-wine's installer.
-for path in "$build_root" "$engine_root" "$msvc_root"; do
+mkdir -p "$build_root"
+for path in "$build_root" "$engine_root"; do
   if [ ! -d "$path" ]; then echo "Missing toolchain directory: $path. See LOCAL_BUILD.md." >&2; exit 1; fi
 done
 build_root="$(realpath "$build_root")"
 engine_root="$(realpath "$engine_root")"
-msvc_root="$(realpath "$msvc_root")"
+if [ "$msvc_root" != /opt/cartograph/msvc ]; then
+  if [ ! -d "$msvc_root" ]; then echo "Missing MSVC override: $msvc_root" >&2; exit 1; fi
+  msvc_root="$(realpath "$msvc_root")"
+fi
 container_home="$build_root/docker-home"
 wine_prefix="${CARTOGRAPH_WINEPREFIX:-$build_root/docker-wine-prefix}"
 cache_home="${CARTOGRAPH_CACHE_HOME:-$build_root/cache}"
@@ -78,8 +82,13 @@ if [ "$mode" = rebuild ] || ! docker image inspect "$image" >/dev/null 2>&1; the
   else
     if [ "$mode" = rebuild ] || ! docker pull "$image"; then
       echo 'Building the shared dependency Dockerfile locally.'
-      # The context contains only the Dockerfile, not SDKs or credentials.
-      docker build --platform linux/amd64 --tag "$image" "$project_root/docker"
+      if [ -z "${WWISE_EMAIL:-}" ] || [ -z "${WWISE_PASSWORD:-}" ]; then
+        echo 'Building the toolchain image requires WWISE_EMAIL and WWISE_PASSWORD. Authenticate to GHCR to pull the prebuilt image instead.' >&2
+        exit 1
+      fi
+      docker build --platform linux/amd64 --tag "$image" \
+        --secret id=WWISE_EMAIL,env=WWISE_EMAIL --secret id=WWISE_PASSWORD,env=WWISE_PASSWORD \
+        "$project_root/docker"
     fi
   fi
 fi
@@ -110,6 +119,7 @@ fi
 # Deduplicate custom mounts when multiple cache overrides use the same path.
 declare -A mounted=(["$build_root"]=1 ["$project_root"]=1)
 for path in "$engine_root" "$msvc_root" "$wine_prefix" "$cache_home" "$temp_dir" "$nuget_dir"; do
+  if [ "$path" = /opt/cartograph/msvc ]; then continue; fi
   if [ -n "${mounted[$path]:-}" ]; then continue; fi
   case "$path" in
     "$build_root"|"$build_root"/*) ;;

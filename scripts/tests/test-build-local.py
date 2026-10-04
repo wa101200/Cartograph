@@ -69,6 +69,8 @@ if sys.argv[1:3] == ['info', '--format']:
         self.assertIn(f"NUGET_PACKAGES={self.tools}/nuget", run)
         self.assertIn(f"TMPDIR={self.tools}/tmp", run)
         self.assertIn(f"XDG_CACHE_HOME={self.tools}/cache", run)
+        self.assertIn('UE_WINE_MSVC=/opt/cartograph/msvc', run)
+        self.assertFalse(any(arg.startswith('type=bind,src=/opt/cartograph/msvc') for arg in run))
 
     def test_external_caches_and_ci_checkout_are_mounted(self):
         paths = {
@@ -119,6 +121,19 @@ if sys.argv[1:3] == ['info', '--format']:
         self.assertIn('1000:1000', run)
         self.assertNotIn('docker.sock', ' '.join(run))
         self.assertNotIn('test-secret-not-for-command-line', ' '.join(run))
+        self.assertNotIn('WWISE_PASSWORD', run)
+        self.assertNotIn('setup-ci-msvc.sh', run[-1])
+
+    def test_explicit_host_msvc_override_is_mounted(self):
+        msvc = self.root / 'custom-msvc'
+        msvc.mkdir()
+        self.env['UE_WINE_MSVC'] = str(msvc)
+        result = self.invoke('--check')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = next(json.loads(line) for line in self.log.read_text().splitlines()
+                   if json.loads(line)[0] == 'run')
+        self.assertIn(f'UE_WINE_MSVC={msvc}', run)
+        self.assertIn(f'type=bind,src={msvc},dst={msvc}', run)
 
     def test_help_does_not_contact_docker(self):
         result = self.invoke("--help")

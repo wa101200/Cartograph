@@ -19,13 +19,10 @@ docker run --rm --init --platform linux/amd64 \
   --env "NUGET_PACKAGES=$CI_CACHE_ROOT/nuget" \
   --env GITHUB_WORKSPACE --env UE_CSS_ROOT --env ENGINE_RELEASE \
   --env WINEPREFIX --env WINEARCH --env WINEDEBUG \
-  --env GH_TOKEN --env WWISE_EMAIL --env WWISE_PASSWORD \
-  --env GITHUB_ENV=/tmp/cartograph-env \
+  --env GH_TOKEN \
   --entrypoint /bin/bash "$CARTOGRAPH_DOCKER_IMAGE" -euo pipefail -c '
     trap "wineserver -k >/dev/null 2>&1 || true" EXIT
     WINEDLLOVERRIDES="mscoree,mshtml=" timeout 120 xvfb-run -a wineboot -u
-    bash .github/scripts/setup-ci-msvc.sh
     bash .github/scripts/prepare-ci-project.sh
     bash .github/scripts/setup-ci-engine.sh
-    bash .github/scripts/setup-ci-wwise.sh
   '

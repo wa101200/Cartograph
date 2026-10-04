@@ -1,3 +1,5 @@
 *
 !Dockerfile
 !.dockerignore
+!install-msvc.sh
+!install-wwise.sh
