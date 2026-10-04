@@ -22,5 +22,5 @@ with open('Engine/Build/Build.version') as f:
     version = json.load(f)
 assert [version[k] for k in ('MajorVersion', 'MinorVersion', 'PatchVersion')] == [5, 6, 1], 'Wrong engine version'
 PY
-./Engine/Binaries/Linux/UnrealVersionSelector -register -unattended
+xvfb-run -a ./Engine/Binaries/Linux/UnrealVersionSelector -register -unattended
 printf '%s\n' "$ENGINE_RELEASE" > .cartograph-installed

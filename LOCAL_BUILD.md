@@ -13,7 +13,9 @@ On the machine whose toolchain was set up in this session:
 ./scripts/build-local.sh          # Build/package using all host CPU threads
 ```
 
-The launcher builds `cartograph-build:local` on first use. Later runs reuse it. Use `--rebuild-image` to rebuild the dependency layer before building the mod.
+The launcher selects the same content-addressed GHCR dependency image as CI, using `scripts/docker-image-ref.sh`. On first use it pulls that image; if it is unpublished or inaccessible, it builds the same Dockerfile locally. Later runs reuse it. Use `--rebuild-image` to rebuild the dependency layer locally before building the mod. `CARTOGRAPH_DOCKER_IMAGE=ghcr.io/wa101200/cartograph-build@sha256:...` can pin the exact digest reported by CI.
+
+If the GHCR package is private, first authenticate Docker to `ghcr.io` with a GitHub token authorized to read the package. Registry authentication stays on the host and is not mounted into build containers.
 
 To limit parallel compilation:
 
@@ -49,13 +51,15 @@ Default host locations under `~/.local/share/cartograph-build`:
 | `msvc/` | MSVC 17.8 / 14.38 + Windows SDK 10.0.22621, with `ue-patches` msvc-wine wrappers |
 | `wwise-cli` | Optional Wwise integration CLI |
 | `cache/` | Optional downloaded Wwise SDK |
+| `nuget/` | .NET package cache |
+| `tmp/` | Persistent temporary downloads and extraction files |
 | `docker-home/` | Container-only HOME/configuration |
 | `docker-home/ddc/` | Writable filesystem derived-data cache; avoids launching Zen in Docker |
 | `docker-wine-prefix/` | Container-only Wine prefix |
 
 The project must contain Wwise SDK/plugin integration **2023.1.14.8770 / 2023.1.14.3555** in `Plugins/Wwise` and `Plugins/WwiseNiagara`. Missing integration can use the existing SDK cache and `wwise-cli`. Engine registration is performed in the container if needed for that integration.
 
-Override `CARTOGRAPH_BUILD_ROOT`, `UE_CSS_ROOT`, and `UE_WINE_MSVC` for different toolchain locations. `CARTOGRAPH_WINEPREFIX` selects another dedicated container prefix. An existing compatible image can be selected with `CARTOGRAPH_DOCKER_IMAGE`; it must provide the same build/runtime commands.
+Override `CARTOGRAPH_BUILD_ROOT`, `UE_CSS_ROOT`, and `UE_WINE_MSVC` for different toolchain locations. `CARTOGRAPH_WINEPREFIX` selects another dedicated container prefix. `CARTOGRAPH_CACHE_HOME`, `CARTOGRAPH_TMPDIR`, and `NUGET_PACKAGES` select alternate persistent cache directories. All custom directories outside the build root are explicitly bind-mounted at the same absolute paths. An existing compatible image can be selected with `CARTOGRAPH_DOCKER_IMAGE`; it must provide the same build/runtime commands.
 
 ## Isolation and credentials
 

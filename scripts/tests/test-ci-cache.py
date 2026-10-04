@@ -28,6 +28,7 @@ class CacheSyncTests(unittest.TestCase):
             protected = [
                 'Intermediate/compiler.obj', 'Binaries/module.so',
                 'Saved/Cooked/asset.bin', 'DerivedDataCache/cache.bin',
+                'Saved/UnrealBuildTool/BuildConfiguration.xml',
                 'Mods/GameFeatures/Cartograph/Binaries/module.dll',
                 'Mods/SML/Intermediate/generated.h',
                 'Plugins/Wwise/Wwise.uplugin',

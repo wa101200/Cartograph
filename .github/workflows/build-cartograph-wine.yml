@@ -9,36 +9,100 @@ on:
 permissions:
   contents: read
 
-# Serialize snapshots of the same branch's generated outputs. Different branches
-# have separate output caches; toolchains are keyed by their pinned inputs.
 concurrency:
   group: cartograph-wine-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  image:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Find the published dependency image
+        id: image
+        shell: bash
+        run: |
+          ref=$(bash scripts/docker-image-ref.sh)
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          if docker manifest inspect "$ref" >/dev/null 2>&1; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Restore Docker build layers
+        if: steps.image.outputs.exists != 'true'
+        uses: useblacksmith/setup-docker-builder@v2
+        with:
+          cache-key: cartograph-dependency-dockerfile
+      - name: Publish dependency image only when inputs change
+        if: steps.image.outputs.exists != 'true'
+        id: publish
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: docker
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.ref }}
+          provenance: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+      - name: Pin the image digest for the build
+        id: resolve
+        shell: bash
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+        run: |
+          digest=$(docker manifest inspect --verbose "$IMAGE_REF" | jq -er '.Descriptor.digest')
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "ref=${IMAGE_REF%%:*}@$digest" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: image
     runs-on: ${{ vars.CARTOGRAPH_LINUX_RUNNER || 'blacksmith-32vcpu-ubuntu-2404' }}
     timeout-minutes: 360
+    permissions:
+      contents: read
+      packages: read
     defaults:
       run:
         shell: bash
     env:
       CI_CACHE_ROOT: /tmp/cg-cache
+      CARTOGRAPH_BUILD_ROOT: /tmp/cg-cache
       PROJECT_ROOT: /tmp/cg
       UE_CSS_ROOT: /tmp/cg-cache/ue
-      WINEPREFIX: /tmp/cg-wine-prefix
+      UE_WINE_MSVC: /tmp/cg-cache/msvc
+      WINEPREFIX: /tmp/cg-cache/docker-wine-prefix
       WINEARCH: win64
       WINEDEBUG: -all
       NUGET_PACKAGES: /tmp/cg-cache/nuget
       ENGINE_RELEASE: ${{ vars.CSS_ENGINE_RELEASE || '5.6.1-css-83' }}
-
+      CARTOGRAPH_DOCKER_IMAGE: ${{ needs.image.outputs.ref }}
     steps:
       - name: Check out source
         uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      - name: Check dependency credentials before restoring toolchains
+      - name: Validate scripts and incremental-cache behavior
+        run: |
+          python3 scripts/tests/test-build-local.py
+          python3 scripts/tests/test-ci-cache.py
+
+      - name: Check dependency credentials
         env:
           GH_TOKEN: ${{ secrets.CSS_ENGINE_TOKEN }}
           WWISE_EMAIL: ${{ secrets.WWISE_EMAIL }}
@@ -46,25 +110,24 @@ jobs:
         run: |
           for name in GH_TOKEN WWISE_EMAIL WWISE_PASSWORD; do
             if [ -z "${!name}" ]; then
-              echo "::error::Missing dependency credential: $name (GH_TOKEN comes from CSS_ENGINE_TOKEN)."
+              echo "::error::Missing dependency credential: $name."
               exit 1
             fi
           done
           gh api repos/satisfactorymodding/UnrealEngine --jq '.full_name'
 
-      - name: Compute cache keys
+      - name: Compute toolchain and incremental-output cache keys
         id: keys
         env:
-          TOOLCHAIN_INPUTS: ${{ hashFiles('.github/ci-packages.txt', '.github/scripts/setup-ci-*.sh') }}
+          TOOLCHAIN_INPUTS: ${{ hashFiles('docker/**', '.github/scripts/setup-ci-*.sh') }}
           ABI_INPUTS: ${{ hashFiles('FactoryGame.uproject', 'Source/*.Target.cs', 'Config/**', 'Mods/**/*.uplugin') }}
         run: |
-          toolchain=$(printf '%s' "ubuntu2404-x64-v1-$ENGINE_RELEASE-$TOOLCHAIN_INPUTS" | sha256sum | cut -c1-24)
-          outputs=$(printf '%s' "v1-$toolchain-$GITHUB_REF-$ABI_INPUTS" | sha256sum | cut -c1-24)
+          toolchain=$(printf '%s' "docker-x64-v2-$ENGINE_RELEASE-$TOOLCHAIN_INPUTS" | sha256sum | cut -c1-24)
+          outputs=$(printf '%s' "v2-$toolchain-$GITHUB_REF-$ABI_INPUTS" | sha256sum | cut -c1-24)
           echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
           echo "outputs=$outputs" >> "$GITHUB_OUTPUT"
-          echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
 
-      - name: Restore engine, MSVC, Wwise, Wine and NuGet storage
+      - name: Restore engine, MSVC, Wwise, NuGet and cooking cache
         uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1
         with:
           key: cartograph-${{ github.repository_id }}-tools-${{ steps.keys.outputs.toolchain }}
@@ -78,65 +141,28 @@ jobs:
           path: /tmp/cg
           commit: on-change
 
-      - name: Restore apt package downloads
-        uses: actions/cache@v5
+      - name: Set ownership of cache mount roots
+        run: sudo chown "$(id -u):$(id -g)" "$CI_CACHE_ROOT" "$PROJECT_ROOT"
+
+      - name: Authenticate to the dependency-image registry
+        uses: docker/login-action@v4
         with:
-          path: ${{ runner.temp }}/cartograph-apt
-          key: apt-ubuntu2404-${{ steps.keys.outputs.month }}-${{ hashFiles('.github/ci-packages.txt') }}
-          restore-keys: |
-            apt-ubuntu2404-
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install build dependencies from cached packages
-        run: |
-          sudo chown "$(id -u):$(id -g)" "$CI_CACHE_ROOT" "$PROJECT_ROOT"
-          mkdir -p "$RUNNER_TEMP/cartograph-apt/partial" "$CI_CACHE_ROOT/ddc" "$NUGET_PACKAGES"
-          mapfile -t packages < .github/ci-packages.txt
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            -o "Dir::Cache::archives=$RUNNER_TEMP/cartograph-apt" "${packages[@]}"
-          echo "UE-LocalDataCachePath=$CI_CACHE_ROOT/ddc" >> "$GITHUB_ENV"
+      - name: Pull shared dependency image (Blacksmith caches Docker images)
+        run: docker pull "$CARTOGRAPH_DOCKER_IMAGE"
 
-      - name: Restore or build patched Wine 11
-        timeout-minutes: 90
-        run: bash .github/scripts/setup-ci-wine.sh
-
-      - name: Restore or install MSVC 17.8 and Windows SDK
-        run: bash .github/scripts/setup-ci-msvc.sh
-
-      - name: Synchronize inputs without invalidating cached timestamps
-        run: bash .github/scripts/prepare-ci-project.sh
-
-      - name: Restore or download and register CSS Unreal Engine
+      - name: Restore or provision toolchains inside Docker
         env:
           GH_TOKEN: ${{ secrets.CSS_ENGINE_TOKEN }}
-        run: bash .github/scripts/setup-ci-engine.sh
-
-      - name: Restore or download and integrate Wwise
-        env:
-          GH_TOKEN: ${{ github.token }}
           WWISE_EMAIL: ${{ secrets.WWISE_EMAIL }}
           WWISE_PASSWORD: ${{ secrets.WWISE_PASSWORD }}
-        run: bash .github/scripts/setup-ci-wwise.sh
+        run: bash .github/scripts/run-ci-container.sh
 
-      - name: Incrementally build Linux editor target
-        run: |
-          "$UE_CSS_ROOT/Engine/Build/BatchFiles/Linux/Build.sh" FactoryEditor Linux Development \
-            "-project=$PROJECT_ROOT/FactoryGame.uproject" -NoUBA -NoDebugInfo "-MaxParallelActions=$(nproc)"
-
-      - name: Incrementally package Windows Steam client
-        run: |
-          hard=$(ulimit -Hn)
-          if [ "$hard" = unlimited ] || [ "$hard" -ge 1048576 ]; then
-            ulimit -Sn 1048576
-          else
-            ulimit -Sn "$hard"
-          fi
-          "$UE_CSS_ROOT/Engine/Build/BatchFiles/RunUAT.sh" \
-            "-ScriptsForProject=$PROJECT_ROOT/FactoryGame.uproject" PackagePlugin \
-            "-project=$PROJECT_ROOT/FactoryGame.uproject" -DLCName=Cartograph \
-            -Target=FactoryGameSteam -merge -build -clientconfig=Shipping -serverconfig=Shipping \
-            -platform=Win64 -nocompileeditor -installed -ddc=InstalledNoZenLocalFallback
-          test -f "$PROJECT_ROOT/Saved/ArchivedPlugins/Cartograph/Cartograph-Windows.zip"
+      - name: Build and package using the local Docker entrypoint
+        run: bash "$PROJECT_ROOT/scripts/build-local.sh"
 
       - name: Upload packaged mod
         uses: actions/upload-artifact@v7
@@ -151,5 +177,4 @@ jobs:
         if: always()
         run: |
           du -sh "$CI_CACHE_ROOT" "$PROJECT_ROOT" 2>/dev/null || true
-          # Remove only our ephemeral Git link; actual checkout metadata isn't cached.
           if [ -L "$PROJECT_ROOT/.git" ]; then unlink "$PROJECT_ROOT/.git"; fi

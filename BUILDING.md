@@ -13,7 +13,9 @@ All local Wine/compiler/Unreal processes run inside the dependency container. Th
 
 The organization repository now has one build workflow: **Build Cartograph (Linux Wine)**. The native Windows workflow and its Windows-runner provisioning script have been removed. Existing repository history, the personal fork, and external runner resources are not deleted.
 
-The workflow runs on push, published release, or manual dispatch using `blacksmith-32vcpu-ubuntu-2404` by default. It builds a **Windows Steam client package** for Satisfactory/Proton. Override `CARTOGRAPH_LINUX_RUNNER` only with an available compatible Linux x64 runner label.
+The workflow runs on push, published release, or manual dispatch. A small `blacksmith-4vcpu-ubuntu-2404` job publishes the shared dependency image to GHCR only when the Docker inputs change. The build job uses `blacksmith-32vcpu-ubuntu-2404` by default and calls the same `scripts/build-local.sh` entrypoint used locally. It builds a **Windows Steam client package** for Satisfactory/Proton. Override `CARTOGRAPH_LINUX_RUNNER` only with an available compatible Linux x64 runner label.
+
+CI and local builds use `docker/Dockerfile`: Ubuntu 24.04 and prebuilt stock Wine 11.0. CI no longer installs APT packages or compiles Wine on the runner. `scripts/docker-image-ref.sh` computes a content-addressed GHCR tag from the Dockerfile and Docker context filter; CI resolves that tag to a digest before starting any build container. Image publishing requires `packages: write` on the image job's `GITHUB_TOKEN`; builds require only `packages: read`. Package access must permit this repository's Actions token.
 
 Required repository secrets:
 
@@ -26,12 +28,27 @@ Required repository secrets:
 
 Two Blacksmith sticky disks persist:
 
-1. **Toolchains:** extracted CSS engine, engine build outputs, compiled/patched Wine, MSVC and Windows SDK plus downloads, Wwise SDK/cache, NuGet packages, and filesystem derived-data cache.
+1. **Toolchains:** extracted CSS engine, engine build outputs, MSVC and Windows SDK plus downloads, Wwise SDK/cache, NuGet packages, filesystem derived-data cache, container HOME, temporary downloads, and the Wine prefix.
 2. **Branch-specific build tree:** generated headers, compiler intermediates, plugin binaries, integrated Wwise plugins, cooked data, staging outputs, and packaged ZIPs.
 
-APT downloads are additionally cached with `actions/cache`. Stable `/tmp/cg-cache` and `/tmp/cg` paths prevent cached MSVC and Unreal paths becoming invalid. Source synchronization uses content checksums so unchanged files keep their timestamps. Installation markers skip completed setup; incomplete compiles resume using their existing outputs. Both disks use `commit: on-change`.
+Stable `/tmp/cg-cache` and `/tmp/cg` paths prevent cached MSVC and Unreal paths becoming invalid. Source synchronization uses content checksums without resetting timestamps. Installation markers skip completed setup; incomplete compiles resume using their existing outputs. Both disks use `commit: on-change`.
 
-Toolchain keys include the pinned engine release, dependency list, setup scripts, OS and architecture. Output keys also include the branch/ref and ABI/configuration inputs. Increment the `v1` cache-key schema in the workflow to force a reset, or delete specific snapshots through Blacksmith's dashboard. Cache reuse and speed improvements still need validation on the first cold and subsequent warm runs of this updated workflow.
+| Container path / mount | Persistent contents |
+| --- | --- |
+| `/tmp/cg` (read/write build disk) | Project, `Binaries`, all `Intermediate` trees, `Saved/Cooked`, staging, packaged ZIPs, Wwise plugins |
+| `/tmp/cg-cache` (read/write toolchain disk) | Engine (including its generated files), MSVC/SDK, downloaded installers, Wwise CLI |
+| `/tmp/cg-cache/docker-home` | Unreal configuration, engine registration, logs, and `ddc/` filesystem cache |
+| `/tmp/cg-cache/cache` | `XDG_CACHE_HOME`: Wwise downloads and general runtime caches |
+| `/tmp/cg-cache/nuget` | .NET package cache (`NUGET_PACKAGES`) |
+| `/tmp/cg-cache/tmp` | Temporary toolchain downloads and extraction files (`TMPDIR`) |
+| `/tmp/cg-cache/docker-wine-prefix` | Persistent Wine registry and initialization state |
+| Runner checkout (read-only) | Current Git metadata referenced by the cached project's temporary `.git` link |
+
+The subdirectories above are all covered by the toolchain bind mount; no nested anonymous volumes hide them. Provisioning and compilation use the same paths and non-root UID. Build containers do **not** receive registry login files or the Docker socket. The Wine prefix is stopped cleanly after each container exits.
+
+Blacksmith automatically caches pulled Docker images for free, including digest-pinned GHCR images. Image builds use `useblacksmith/setup-docker-builder` and its persistent build-layer cache; there is no per-run image rebuild or APT restore.
+
+Toolchain keys include the pinned engine release, Docker inputs, setup scripts, and architecture. Output keys also include the branch/ref and ABI/configuration inputs. Increment the `v2` cache-key schema in the workflow to force a reset, or delete specific snapshots through Blacksmith's dashboard. Cache reuse and speed improvements require cold and subsequent warm runs of this updated workflow.
 
 **Sticky disks are paid storage**, currently documented at $0.50/GB/month, with automatic eviction after seven days of inactivity. Large toolchain/output caches can occupy tens of GB. Manage them at <https://app.blacksmith.sh>.
 

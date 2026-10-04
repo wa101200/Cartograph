@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
     && apt-get install -y --no-install-recommends \
         build-essential ca-certificates curl dos2unix gh git \
-        msitools ninja-build patch perl python3 tar unzip zstd \
+        msitools ninja-build patch perl python3 rsync tar unzip zstd \
         libicu74 libssl3t64 libgtk-3-0t64 libnss3 libxss1 \
         libasound2t64 libgbm1 libvulkan1 libunwind8 libcurl4t64 \
         xvfb xauth \

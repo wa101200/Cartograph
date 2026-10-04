@@ -19,20 +19,5 @@ fi
 # Only a link is persisted, not checkout credentials or Git configuration.
 ln -sfn "$GITHUB_WORKSPACE/.git" "$PROJECT_ROOT/.git"
 
-mkdir -p "$PROJECT_ROOT/Saved/UnrealBuildTool"
-configuration="$PROJECT_ROOT/Saved/UnrealBuildTool/BuildConfiguration.xml"
-temporary=$(mktemp)
-trap 'rm -f "$temporary"' EXIT
-cat > "$temporary" <<EOF
-<?xml version="1.0" encoding="utf-8"?>
-<Configuration xmlns="https://www.unrealengine.com/BuildConfiguration">
-  <BuildConfiguration>
-    <bAllowUBAExecutor>false</bAllowUBAExecutor>
-    <MaxParallelActions>$(nproc)</MaxParallelActions>
-    <DebugInfo>None</DebugInfo>
-  </BuildConfiguration>
-</Configuration>
-EOF
-if ! cmp -s "$temporary" "$configuration"; then
-  mv "$temporary" "$configuration"
-fi
+# The shared container-side build script owns UBT settings. Do not rewrite them
+# here: two serializers would change timestamps and invalidate warm builds.

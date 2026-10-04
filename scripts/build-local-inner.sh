@@ -90,8 +90,12 @@ for name, value in [('bAllowUBAExecutor', 'false'), ('MaxParallelActions', sys.a
     if element is None:
         element = ET.SubElement(section, tag(name))
     element.text = value
+import io
+contents = io.BytesIO()
+tree.write(contents, encoding='utf-8', xml_declaration=True)
 path.parent.mkdir(parents=True, exist_ok=True)
-tree.write(path, encoding='utf-8', xml_declaration=True)
+if not path.exists() or path.read_bytes() != contents.getvalue():
+    path.write_bytes(contents.getvalue())
 PY
 
 # Provide the Windows SDK debug tool used by Alpakit's staging step.

@@ -10,7 +10,7 @@ if [ ! -x "$cli" ]; then
 fi
 # Authentication is held in memory by wwise-cli. Cache only downloaded SDKs and
 # integration files; never save shell environments or authentication config.
-export XDG_CACHE_HOME="$CI_CACHE_ROOT/wwise-cache"
+export XDG_CACHE_HOME="$CI_CACHE_ROOT/cache"
 if [ ! -f "$CI_CACHE_ROOT/.wwise-sdk-installed" ]; then
   "$cli" download --sdk-version '2023.1.14.8770' --filter Packages=SDK \
     --filter DeploymentPlatforms=Windows_vc160 --filter DeploymentPlatforms=Windows_vc170 \

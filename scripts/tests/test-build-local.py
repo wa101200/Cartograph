@@ -43,7 +43,8 @@ if sys.argv[1:3] == ['info', '--format']:
             JOBS="8",
             GH_TOKEN="test-secret-not-for-command-line",
         )
-        for name in ("UE_CSS_ROOT", "UE_WINE_MSVC", "CARTOGRAPH_DOCKER_IMAGE", "CARTOGRAPH_WINEPREFIX"):
+        for name in ("UE_CSS_ROOT", "UE_WINE_MSVC", "CARTOGRAPH_DOCKER_IMAGE", "CARTOGRAPH_WINEPREFIX",
+                     "CARTOGRAPH_CACHE_HOME", "CARTOGRAPH_TMPDIR", "NUGET_PACKAGES", "GITHUB_ACTIONS"):
             self.env.pop(name, None)
 
     def invoke(self, *args):
@@ -65,6 +66,28 @@ if sys.argv[1:3] == ['info', '--format']:
         self.assertIn(f"WINEPREFIX={self.tools}/docker-wine-prefix", run)
         self.assertIn(f"UE-LocalDataCachePath={self.tools}/docker-home/ddc", run)
         self.assertIn(f"type=bind,src={self.tools},dst={self.tools}", run)
+        self.assertIn(f"NUGET_PACKAGES={self.tools}/nuget", run)
+        self.assertIn(f"TMPDIR={self.tools}/tmp", run)
+        self.assertIn(f"XDG_CACHE_HOME={self.tools}/cache", run)
+
+    def test_external_caches_and_ci_checkout_are_mounted(self):
+        paths = {
+            'CARTOGRAPH_WINEPREFIX': self.root / 'wine',
+            'CARTOGRAPH_CACHE_HOME': self.root / 'cache',
+            'CARTOGRAPH_TMPDIR': self.root / 'temp',
+            'NUGET_PACKAGES': self.root / 'nuget',
+        }
+        self.env.update({name: str(path) for name, path in paths.items()})
+        checkout = self.root / 'checkout'
+        checkout.mkdir()
+        self.env.update(GITHUB_ACTIONS='true', GITHUB_WORKSPACE=str(checkout))
+        result = self.invoke('--check')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = next(json.loads(line) for line in self.log.read_text().splitlines()
+                   if json.loads(line)[0] == 'run')
+        for path in paths.values():
+            self.assertIn(f'type=bind,src={path},dst={path}', run)
+        self.assertIn(f'type=bind,src={checkout},dst={checkout},readonly', run)
 
     def test_bad_jobs_does_not_start_container(self):
         self.env["JOBS"] = "0"
@@ -73,6 +96,29 @@ if sys.argv[1:3] == ['info', '--format']:
         self.assertIn("positive integer", result.stderr)
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
         self.assertFalse(any(call[0] == "run" for call in calls))
+
+    def test_ci_provisioning_mounts_persisted_state_without_socket(self):
+        checkout = self.root / 'checkout'
+        checkout.mkdir()
+        project = self.root / 'project'
+        project.mkdir()
+        self.env.update(
+            CARTOGRAPH_DOCKER_IMAGE='ghcr.io/wa101200/cartograph-build@sha256:test',
+            CI_CACHE_ROOT=str(self.tools), PROJECT_ROOT=str(project),
+            GITHUB_WORKSPACE=str(checkout), WINEPREFIX=str(self.tools / 'docker-wine-prefix'),
+        )
+        helper = SCRIPT.parents[1] / '.github/scripts/run-ci-container.sh'
+        result = subprocess.run(['bash', str(helper)], env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = json.loads(self.log.read_text().splitlines()[0])
+        self.assertIn(f'type=bind,src={self.tools},dst={self.tools}', run)
+        self.assertIn(f'type=bind,src={project},dst={project}', run)
+        self.assertIn(f'type=bind,src={checkout},dst={checkout},readonly', run)
+        for setting in ['TMPDIR', 'XDG_CACHE_HOME', 'NUGET_PACKAGES']:
+            self.assertTrue(any(arg.startswith(f'{setting}={self.tools}/') for arg in run))
+        self.assertIn('1000:1000', run)
+        self.assertNotIn('docker.sock', ' '.join(run))
+        self.assertNotIn('test-secret-not-for-command-line', ' '.join(run))
 
     def test_help_does_not_contact_docker(self):
         result = self.invoke("--help")
